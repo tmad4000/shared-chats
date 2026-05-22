@@ -1,0 +1,30 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg-primary: #faf9f7;
+  --bg-secondary: #f5f3ef;
+  --bg-card: #ffffff;
+  --text-primary: #1a1a1a;
+  --text-secondary: #6b6b6b;
+  --text-tertiary: #999;
+  --accent: #2d5a27;
+  --accent-light: #4a8c42;
+  --accent-bg: rgba(45, 90, 39, 0.08);
+  --border: rgba(0, 0, 0, 0.08);
+  --radius-md: 12px;
+  --radius-lg: 20px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: linear-gradient(180deg, #ece8df 0%, #f4f1ea 60%);
+  color: var(--text-primary);
+  line-height: 1.55;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); }
+code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
