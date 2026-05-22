@@ -30,6 +30,76 @@ The mockup at `mockups/bettergpt-multiplayer-v5.html` shows all of this.
 
 ---
 
+## Agent-first endpoint · the share is a TOOL, not just a button
+
+**Critical refinement (2026-05-22, added after v5 mockup):** the share operation has to be reachable from *four* surfaces, all hitting the same endpoint:
+
+| Surface | Caller | Example |
+|---|---|---|
+| 1. **Web UI Share button** | Human | Click the "⤴ share this chat" button in the chat footer |
+| 2. **Agent tool call** | The agent, in-conversation | User says *"Share this with Sarah"* → agent invokes `share_chat({...})` and replies with the URL |
+| 3. **MCP server** | Any external agent (Cursor, Codex, other Claude session) | `mcp__bettergpt__share_chat` exposed alongside `bettergpt_get_chat` etc. |
+| 4. **REST / CLI** | Scripts, automation | `POST /api/sessions/:id/share` or `bettergpt share --to sarah --files src/` |
+
+All four are thin wrappers over one endpoint. This matches the agent-first surfaces pattern from WIT (`.well-known/mcp/server-card.json` + OpenAPI + REST + UI all hitting Supabase Edge functions).
+
+### Tool spec (sketch)
+
+```typescript
+{
+  name: "share_chat",
+  description: "Promote the current chat session to a shared cloud workspace. Invited users can read the conversation and (in multiplayer mode) prompt the same agent. Context is per-resource ACL — default is share conversation only, everything else opt-in.",
+  parameters: {
+    sessionId:  { type: "string", description: "Local session ID (defaults to current)" },
+    recipients: { type: "array", items: { type: "string" },
+                  description: "Email addresses or @handles" },
+    context: {
+      type: "object",
+      properties: {
+        files:  { type: "array", items: { type: "string" },
+                  description: "File paths/directories to mount read-only" },
+        mcps:   { type: "array", items: { type: "string" },
+                  description: "MCP server names to share access to (some hard-locked private)" },
+        memory: { type: "boolean", default: false,
+                  description: "Share Noos memory graph (default: private)" }
+      }
+    },
+    mode: { type: "string", enum: ["multiplayer", "viewer"], default: "multiplayer" },
+    expiresIn: { type: "string", description: "ISO duration, e.g. P7D for 7 days (default: never)" }
+  },
+  returns: {
+    workspace_url: { type: "string" },
+    invite_status: { type: "array", description: "Per-recipient email/notification status" },
+    context_mounted: { type: "array" },
+    revoke_token: { type: "string", description: "Use to DELETE the workspace later" }
+  }
+}
+```
+
+### Why this matters
+
+- **Conversational share**: "Hey, share this with the team and let them in" is how a user would naturally talk to the agent. If the agent can't do it, the UX is broken.
+- **Cross-session orchestration**: a Codex session inspecting Cortex code can hand off the conversation to a betterGPT shared workspace via MCP — the chain of agents matters.
+- **Automation**: scripts that file beads tickets or trigger CI can also share chats. CLI matters.
+- **Composability**: same endpoint means one auth/permission path, one audit log, one set of edge cases.
+
+### What changes in Path A (betterGPT) build sequence
+
+Block 2 (Local → shared promotion) now explicitly delivers:
+1. REST endpoint `POST /api/sessions/:id/share`
+2. Web UI Share button calling the endpoint
+3. **Agent tool `share_chat` callable from the betterGPT in-app agent**
+4. **MCP server entry `mcp__bettergpt__share_chat` exposed via `.well-known/mcp/server-card.json`**
+5. CLI `bettergpt share` (optional — Block 5 polish)
+
+Each surface lives in version control under a clear file. The tool definition lives next to the endpoint and is the single source of truth.
+
+### Cortex beads update
+
+`cortex-main-cux.3` (Block 2) has been updated with this requirement.
+
+---
+
 ## Why this is the differentiator
 
 From the competitive research earlier in this session:
