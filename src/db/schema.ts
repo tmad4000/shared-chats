@@ -1,4 +1,5 @@
-import { pgTable, text, timestamp, uuid, primaryKey } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, integer, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 // ============ users ============
 // Email is the natural identity (matches betterGPT design — see note-sharing-service.ts
@@ -54,6 +55,26 @@ export const chatMembers = pgTable("chat_members", {
   pk: primaryKey({ columns: [t.chatId, t.userId] }),
 }));
 
+// ============ context_resources ============
+// Small text/file snippets mounted into a chat with per-resource visibility.
+export const contextResources = pgTable("context_resources", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  chatId: uuid("chat_id").notNull().references(() => chats.id, { onDelete: "cascade" }),
+  addedById: uuid("added_by_id").notNull().references(() => users.id),
+  kind: text("kind").notNull(),
+  name: text("name").notNull(),
+  content: text("content").notNull(),
+  mimeType: text("mime_type"),
+  sizeBytes: integer("size_bytes").notNull(),
+  permission: text("permission").notNull().default("shared"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  kindCheck: check("context_resources_kind_check", sql`${t.kind} in ('text', 'file')`),
+  permissionCheck: check("context_resources_permission_check", sql`${t.permission} in ('private', 'shared')`),
+  sizeCheck: check("context_resources_size_check", sql`${t.sizeBytes} >= 0 and ${t.sizeBytes} <= 102400`),
+  contentBytesCheck: check("context_resources_content_bytes_check", sql`octet_length(${t.content}) <= 102400`),
+}));
+
 // ============ api_keys ============
 // Bearer tokens for external MCP/automation callers. Only the SHA-256 hash is stored.
 export const apiKeys = pgTable("api_keys", {
@@ -70,4 +91,5 @@ export type Chat = typeof chats.$inferSelect;
 export type Message = typeof messages.$inferSelect;
 export type ShareLink = typeof shareLinks.$inferSelect;
 export type ChatMember = typeof chatMembers.$inferSelect;
+export type ContextResource = typeof contextResources.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;

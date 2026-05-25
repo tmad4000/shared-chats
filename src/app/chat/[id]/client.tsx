@@ -7,6 +7,32 @@ import type { Chat, Message } from "@/db/schema";
 type Member = { id: string; email: string; name: string | null; isOwner: boolean };
 type CurrentUser = { id: string; email: string; name: string | null };
 type ShareLink = { token: string; createdAt: string | Date };
+type ContextResource = {
+  id: string;
+  chatId: string;
+  addedById: string;
+  kind: "text" | "file";
+  name: string;
+  content: string;
+  mimeType: string | null;
+  sizeBytes: number;
+  permission: "private" | "shared";
+  createdAt: string | Date;
+  addedByName?: string | null;
+  addedByEmail?: string | null;
+};
+
+const MAX_CONTEXT_BYTES = 100 * 1024;
+const smallButtonStyle = {
+  border: "1px solid var(--border)",
+  background: "transparent",
+  color: "var(--text-secondary)",
+  padding: "6px 10px",
+  borderRadius: 7,
+  cursor: "pointer",
+  font: "inherit",
+  fontSize: 12,
+};
 
 export function ChatClient({
   chat,
@@ -28,6 +54,23 @@ export function ChatClient({
   const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
   const [linksLoading, setLinksLoading] = useState(false);
   const [revokingToken, setRevokingToken] = useState<string | null>(null);
+  const [contextPanelOpen, setContextPanelOpen] = useState(false);
+  const [contextResources, setContextResources] = useState<ContextResource[]>([]);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextFormOpen, setContextFormOpen] = useState(false);
+  const [contextKind, setContextKind] = useState<"text" | "file">("text");
+  const [contextName, setContextName] = useState("");
+  const [contextContent, setContextContent] = useState("");
+  const [contextMimeType, setContextMimeType] = useState<string | null>(null);
+  const [contextPermission, setContextPermission] = useState<"private" | "shared">("shared");
+  const [contextSaving, setContextSaving] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [editingContext, setEditingContext] = useState<{
+    id: string;
+    name: string;
+    permission: "private" | "shared";
+  } | null>(null);
+  const [deletingContextId, setDeletingContextId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const isOwner = chat.ownerId === currentUser.id;
 
@@ -60,6 +103,10 @@ export function ChatClient({
       void loadShareLinks();
     }
   }, [isOwner, sharePanelOpen]);
+
+  useEffect(() => {
+    void loadContextResources();
+  }, [chat.id]);
 
   async function send(e: FormEvent) {
     e.preventDefault();
@@ -145,6 +192,113 @@ export function ChatClient({
     }
   }
 
+  async function loadContextResources() {
+    setContextLoading(true);
+    try {
+      const r = await fetch(`/api/chats/${chat.id}/context`, { cache: "no-store" });
+      if (!r.ok) throw new Error("list context failed");
+      const j = await r.json();
+      setContextResources(j.resources ?? []);
+    } catch {
+      setContextResources([]);
+    } finally {
+      setContextLoading(false);
+    }
+  }
+
+  async function addContext(e: FormEvent) {
+    e.preventDefault();
+    setContextError(null);
+    const sizeBytes = utf8Bytes(contextContent);
+    if (!contextName.trim()) {
+      setContextError("Name is required.");
+      return;
+    }
+    if (!contextContent.trim()) {
+      setContextError("Content is required.");
+      return;
+    }
+    if (sizeBytes > MAX_CONTEXT_BYTES) {
+      setContextError("Context must be 100KB or smaller.");
+      return;
+    }
+
+    setContextSaving(true);
+    try {
+      const r = await fetch(`/api/chats/${chat.id}/context`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: contextKind,
+          name: contextName.trim(),
+          content: contextContent,
+          mimeType: contextMimeType,
+          permission: contextPermission,
+        }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error || "add context failed");
+      }
+      resetContextForm();
+      setContextFormOpen(false);
+      await loadContextResources();
+    } catch (err) {
+      setContextError(err instanceof Error ? err.message : "Could not add context.");
+    } finally {
+      setContextSaving(false);
+    }
+  }
+
+  async function updateContext(resourceId: string) {
+    if (!editingContext) return;
+    const r = await fetch(`/api/chats/${chat.id}/context/${resourceId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: editingContext.name, permission: editingContext.permission }),
+    });
+    if (r.ok) {
+      setEditingContext(null);
+      await loadContextResources();
+    }
+  }
+
+  async function deleteContext(resourceId: string) {
+    setDeletingContextId(resourceId);
+    try {
+      const r = await fetch(`/api/chats/${chat.id}/context/${resourceId}`, { method: "DELETE" });
+      if (r.ok) setContextResources((prev) => prev.filter((resource) => resource.id !== resourceId));
+    } finally {
+      setDeletingContextId(null);
+    }
+  }
+
+  async function readContextFile(file: File) {
+    setContextError(null);
+    if (file.size > MAX_CONTEXT_BYTES) {
+      setContextError("File must be 100KB or smaller.");
+      return;
+    }
+    const text = await file.text();
+    if (utf8Bytes(text) > MAX_CONTEXT_BYTES) {
+      setContextError("File content must be 100KB or smaller.");
+      return;
+    }
+    setContextKind("file");
+    setContextName(file.name);
+    setContextMimeType(file.type || "text/plain");
+    setContextContent(text);
+  }
+
+  function resetContextForm() {
+    setContextKind("text");
+    setContextName("");
+    setContextContent("");
+    setContextMimeType(null);
+    setContextPermission("shared");
+    setContextError(null);
+  }
+
   function buildShareUrl(token: string) {
     return `${window.location.origin}/c/${token}`;
   }
@@ -184,6 +338,22 @@ export function ChatClient({
             </span>
           ))}
         </div>
+
+        <button
+          onClick={() => {
+            setContextPanelOpen((open) => !open);
+            if (!contextPanelOpen) void loadContextResources();
+          }}
+          style={{
+            background: contextPanelOpen ? "var(--accent-bg)" : "transparent",
+            color: contextPanelOpen ? "var(--accent)" : "var(--text-secondary)",
+            border: "1px solid var(--border)",
+            padding: "8px 12px", borderRadius: 8, fontSize: 13, fontWeight: 500,
+            cursor: "pointer", fontFamily: "inherit",
+          }}
+        >
+          📎 {contextResources.length ? `${contextResources.length} context` : "Context"}
+        </button>
 
         {isOwner && (
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -312,6 +482,311 @@ export function ChatClient({
         </div>
       )}
 
+      {contextPanelOpen && (
+        <div style={{
+          padding: "14px 24px 16px",
+          background: "rgba(251, 250, 247, 0.92)",
+          borderBottom: "1px solid var(--border)",
+        }}>
+          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+              <strong style={{ fontSize: 13, flex: 1 }}>Mounted context</strong>
+              <span style={{ color: "var(--text-tertiary)", fontSize: 12 }}>
+                {contextLoading ? "Loading..." : `${contextResources.length} visible`}
+              </span>
+              <button
+                onClick={() => setContextFormOpen((open) => !open)}
+                style={{
+                  background: "var(--accent)",
+                  color: "white",
+                  border: 0,
+                  padding: "7px 11px",
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  font: "inherit",
+                  fontSize: 12,
+                  fontWeight: 500,
+                }}
+              >
+                + Add context
+              </button>
+            </div>
+
+            {contextFormOpen && (
+              <form onSubmit={addContext} style={{
+                border: "1px solid var(--border)",
+                background: "var(--bg-card)",
+                borderRadius: 8,
+                padding: 12,
+                marginBottom: 12,
+              }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, marginBottom: 10 }}>
+                  <input
+                    value={contextName}
+                    onChange={(e) => setContextName(e.target.value)}
+                    placeholder="Context name"
+                    style={{
+                      border: "1px solid var(--border)",
+                      borderRadius: 7,
+                      padding: "8px 10px",
+                      font: "inherit",
+                      fontSize: 13,
+                    }}
+                  />
+                  <select
+                    value={contextPermission}
+                    onChange={(e) => setContextPermission(e.target.value as "private" | "shared")}
+                    style={{
+                      border: "1px solid var(--border)",
+                      borderRadius: 7,
+                      padding: "8px 10px",
+                      font: "inherit",
+                      fontSize: 13,
+                      background: "white",
+                    }}
+                  >
+                    <option value="shared">Shared</option>
+                    <option value="private">Private</option>
+                  </select>
+                  <label style={{
+                    border: "1px solid var(--border)",
+                    borderRadius: 7,
+                    padding: "8px 10px",
+                    font: "inherit",
+                    fontSize: 13,
+                    color: "var(--text-secondary)",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                  }}>
+                    File
+                    <input
+                      type="file"
+                      style={{ display: "none" }}
+                      onChange={(e) => {
+                        const file = e.currentTarget.files?.[0];
+                        if (file) void readContextFile(file);
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const file = e.dataTransfer.files?.[0];
+                    if (file) void readContextFile(file);
+                  }}
+                >
+                  <textarea
+                    value={contextContent}
+                    onChange={(e) => {
+                      setContextKind("text");
+                      setContextMimeType(null);
+                      setContextContent(e.target.value);
+                    }}
+                    placeholder="Paste context text, or drop a small text file here."
+                    rows={6}
+                    style={{
+                      width: "100%",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      padding: 10,
+                      resize: "vertical",
+                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                      fontSize: 12.5,
+                      lineHeight: 1.45,
+                    }}
+                  />
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+                  <span style={{ color: utf8Bytes(contextContent) > MAX_CONTEXT_BYTES ? "#963030" : "var(--text-tertiary)", fontSize: 12, flex: 1 }}>
+                    {contextKind === "file" ? "file" : "text"} · {formatBytes(utf8Bytes(contextContent))} / 100KB
+                  </span>
+                  {contextError && <span style={{ color: "#963030", fontSize: 12 }}>{contextError}</span>}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetContextForm();
+                      setContextFormOpen(false);
+                    }}
+                    style={{
+                      border: "1px solid var(--border)",
+                      background: "transparent",
+                      color: "var(--text-secondary)",
+                      padding: "7px 10px",
+                      borderRadius: 7,
+                      cursor: "pointer",
+                      font: "inherit",
+                      fontSize: 12,
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={contextSaving}
+                    style={{
+                      border: 0,
+                      background: "var(--accent)",
+                      color: "white",
+                      padding: "7px 11px",
+                      borderRadius: 7,
+                      cursor: contextSaving ? "wait" : "pointer",
+                      font: "inherit",
+                      fontSize: 12,
+                      fontWeight: 500,
+                    }}
+                  >
+                    {contextSaving ? "Adding..." : "Add"}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {contextResources.length === 0 && !contextLoading ? (
+              <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                No context attached yet.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {contextResources.map((resource) => {
+                  const canManage = isOwner || resource.addedById === currentUser.id;
+                  const editing = editingContext?.id === resource.id;
+                  return (
+                    <div
+                      key={resource.id}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "32px minmax(0, 1fr) auto",
+                        gap: 10,
+                        alignItems: "center",
+                        background: "var(--bg-card)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: "9px 10px",
+                      }}
+                    >
+                      <span style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 7,
+                        display: "grid",
+                        placeItems: "center",
+                        background: resource.kind === "file" ? "rgba(74, 91, 140, 0.10)" : "var(--accent-bg)",
+                        color: resource.kind === "file" ? "#4a5b8c" : "var(--accent)",
+                        fontSize: 12,
+                        fontWeight: 700,
+                      }}>
+                        {resource.kind === "file" ? "F" : "T"}
+                      </span>
+                      <div style={{ minWidth: 0 }}>
+                        {editing ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8 }}>
+                            <input
+                              value={editingContext.name}
+                              onChange={(e) => setEditingContext({ ...editingContext, name: e.target.value })}
+                              style={{
+                                minWidth: 0,
+                                border: "1px solid var(--border)",
+                                borderRadius: 7,
+                                padding: "6px 8px",
+                                font: "inherit",
+                                fontSize: 13,
+                              }}
+                            />
+                            <select
+                              value={editingContext.permission}
+                              onChange={(e) => setEditingContext({ ...editingContext, permission: e.target.value as "private" | "shared" })}
+                              style={{
+                                border: "1px solid var(--border)",
+                                borderRadius: 7,
+                                padding: "6px 8px",
+                                font: "inherit",
+                                fontSize: 13,
+                                background: "white",
+                              }}
+                            >
+                              <option value="shared">Shared</option>
+                              <option value="private">Private</option>
+                            </select>
+                          </div>
+                        ) : (
+                          <>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
+                              <strong style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {resource.name}
+                              </strong>
+                              <span style={{
+                                fontSize: 10,
+                                padding: "1px 6px",
+                                borderRadius: 4,
+                                color: resource.permission === "shared" ? "var(--accent)" : "#8a6a24",
+                                background: resource.permission === "shared" ? "var(--accent-bg)" : "rgba(138, 106, 36, 0.10)",
+                                textTransform: "uppercase",
+                                letterSpacing: "0.04em",
+                              }}>
+                                {resource.permission}
+                              </span>
+                            </div>
+                            <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
+                              {formatBytes(resource.sizeBytes)} · added by {resource.addedByName || resource.addedByEmail || "unknown"}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      {canManage && (
+                        <div style={{ display: "flex", gap: 7 }}>
+                          {editing ? (
+                            <>
+                              <button
+                                onClick={() => updateContext(resource.id)}
+                                style={smallButtonStyle}
+                              >
+                                Save
+                              </button>
+                              <button
+                                onClick={() => setEditingContext(null)}
+                                style={smallButtonStyle}
+                              >
+                                Cancel
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => setEditingContext({ id: resource.id, name: resource.name, permission: resource.permission })}
+                                style={smallButtonStyle}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => deleteContext(resource.id)}
+                                disabled={deletingContextId === resource.id}
+                                style={{
+                                  ...smallButtonStyle,
+                                  border: "1px solid rgba(150, 40, 40, 0.22)",
+                                  background: "rgba(150, 40, 40, 0.06)",
+                                  color: "#963030",
+                                  cursor: deletingContextId === resource.id ? "wait" : "pointer",
+                                }}
+                              >
+                                {deletingContextId === resource.id ? "Deleting..." : "Delete"}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <div style={{
         flex: 1, overflowY: "auto",
         padding: "24px 24px 12px",
@@ -416,4 +891,13 @@ function mergeMessages(current: Message[], incoming: Message[]) {
   return Array.from(byId.values()).sort(
     (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
   );
+}
+
+function utf8Bytes(value: string) {
+  return new TextEncoder().encode(value).length;
+}
+
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`;
+  return `${(value / 1024).toFixed(1)} KB`;
 }

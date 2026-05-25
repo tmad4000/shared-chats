@@ -9,7 +9,7 @@ if (!apiKey) {
 export const anthropic = new Anthropic({ apiKey });
 
 const MODEL = "claude-sonnet-4-5";
-const SYSTEM_PROMPT =
+export const SYSTEM_PROMPT =
   "You are Claude in a shared-chat workspace where multiple humans can prompt you. Be concise, helpful, and aware that other people may see your responses. When referenced files or context aren't available yet (this is an MVP), be transparent about that. If the user asks to share the current chat, use the share_chat tool and include the returned URL in your reply.";
 
 export const SHARE_CHAT_TOOL: Anthropic.Tool = {
@@ -58,7 +58,10 @@ export async function generateReply(
   return extractText(resp) || "(No reply)";
 }
 
-export async function createClaudeMessage(messages: ClaudeMessageParam[]): Promise<ClaudeMessage> {
+export async function createClaudeMessage(
+  messages: ClaudeMessageParam[],
+  options?: { systemPrompt?: string },
+): Promise<ClaudeMessage> {
   if (!apiKey) {
     return {
       id: "demo",
@@ -86,7 +89,7 @@ export async function createClaudeMessage(messages: ClaudeMessageParam[]): Promi
   return anthropic.messages.create({
     model: MODEL,
     max_tokens: 2048,
-    system: SYSTEM_PROMPT,
+    system: options?.systemPrompt ?? SYSTEM_PROMPT,
     messages,
     tools: [SHARE_CHAT_TOOL],
     tool_choice: { type: "auto" },

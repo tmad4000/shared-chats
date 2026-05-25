@@ -7,11 +7,13 @@ import { and, asc, eq, gt } from "drizzle-orm";
 import {
   createClaudeMessage,
   extractText,
+  SYSTEM_PROMPT,
   type ClaudeMessageParam,
   type ClaudeToolUseBlock,
 } from "@/lib/anthropic";
 import { createShareLink, type ShareMode } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
+import { buildSystemPromptWithContext, listVisibleContextResources } from "@/lib/context";
 
 export const dynamic = "force-dynamic";
 
@@ -81,20 +83,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
   let assistantMsg = null;
   try {
-    const history = await withUserDb(user.id, async (tx) =>
-      tx
+    const replyInput = await withUserDb(user.id, async (tx) => {
+      const history = await tx
         .select()
         .from(messages)
         .where(eq(messages.chatId, chatId))
-        .orderBy(asc(messages.createdAt)),
-    );
+        .orderBy(asc(messages.createdAt));
+      const resources = await listVisibleContextResources(tx, chatId);
+      return { history, resources };
+    });
 
-    const turns: ClaudeMessageParam[] = history.map((m) => ({
+    const turns: ClaudeMessageParam[] = replyInput.history.map((m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
     }));
 
-    const reply = await generateReplyWithTools(turns, chatId, user.id, getRequestOrigin(req));
+    const systemPrompt = buildSystemPromptWithContext(SYSTEM_PROMPT, replyInput.resources);
+    const reply = await generateReplyWithTools(turns, chatId, user.id, getRequestOrigin(req), systemPrompt);
     assistantMsg = await withUserDb(user.id, async (tx) => {
       const [inserted] = await tx
         .insert(messages)
@@ -121,11 +126,12 @@ async function generateReplyWithTools(
   chatId: string,
   userId: string,
   baseUrl: string,
+  systemPrompt: string,
 ): Promise<string> {
   const messages = [...conversation];
 
   for (let i = 0; i < 3; i++) {
-    const resp = await createClaudeMessage(messages);
+    const resp = await createClaudeMessage(messages, { systemPrompt });
     const toolUses = resp.content.filter((block): block is ClaudeToolUseBlock => block.type === "tool_use");
 
     if (toolUses.length === 0) {

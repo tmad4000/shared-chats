@@ -52,4 +52,46 @@ export const MCP_TOOLS = [
       required: ["chatId", "content"],
     },
   },
+  {
+    name: "list_context",
+    title: "List Context",
+    description: "List context resources visible to the authenticated user for a chat.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chatId: { type: "string" },
+      },
+      required: ["chatId"],
+    },
+  },
+  {
+    name: "attach_context",
+    title: "Attach Context",
+    description: "Attach a small text or file context resource to a visible chat. Content must be 100KB or smaller.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chatId: { type: "string" },
+        kind: { type: "string", enum: ["text", "file"] },
+        name: { type: "string" },
+        content: { type: "string" },
+        mimeType: { type: "string" },
+        permission: { type: "string", enum: ["private", "shared"], default: "shared" },
+      },
+      required: ["chatId", "kind", "name", "content"],
+    },
+  },
+  {
+    name: "remove_context",
+    title: "Remove Context",
+    description: "Remove a context resource from a chat if the API key user uploaded it or owns the chat.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chatId: { type: "string" },
+        resourceId: { type: "string" },
+      },
+      required: ["chatId", "resourceId"],
+    },
+  },
 ] as const;

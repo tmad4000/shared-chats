@@ -5,6 +5,7 @@
 -- The app sets these transaction-local variables with withUserDb():
 --   app.current_user_id
 --   app.current_share_token
+--   app.current_api_key_hash
 -- ============================================================
 
 create or replace function public.current_app_user_id() returns uuid as $$
@@ -173,6 +174,82 @@ create policy chat_members_insert_join_token on public.chat_members
 drop policy if exists chat_members_delete_self_or_owner on public.chat_members;
 create policy chat_members_delete_self_or_owner on public.chat_members
   for delete using (user_id = public.current_app_user_id());
+
+-- ============================================================
+-- context_resources
+-- ============================================================
+alter table public.context_resources enable row level security;
+alter table public.context_resources force row level security;
+
+drop policy if exists context_resources_select_visible on public.context_resources;
+create policy context_resources_select_visible on public.context_resources
+  for select using (
+    added_by_id = public.current_app_user_id()
+    or (
+      permission = 'shared'
+      and exists (
+        select 1
+        from public.chats c
+        where c.id = context_resources.chat_id
+      )
+    )
+  );
+
+drop policy if exists context_resources_insert_chat_access on public.context_resources;
+create policy context_resources_insert_chat_access on public.context_resources
+  for insert with check (
+    added_by_id = public.current_app_user_id()
+    and kind in ('text', 'file')
+    and permission in ('private', 'shared')
+    and size_bytes >= 0
+    and size_bytes <= 102400
+    and octet_length(content) <= 102400
+    and exists (
+      select 1
+      from public.chats c
+      where c.id = context_resources.chat_id
+    )
+  );
+
+drop policy if exists context_resources_update_owner_or_chat_owner on public.context_resources;
+create policy context_resources_update_owner_or_chat_owner on public.context_resources
+  for update using (
+    added_by_id = public.current_app_user_id()
+    or exists (
+      select 1
+      from public.chats c
+      where c.id = context_resources.chat_id
+        and c.owner_id = public.current_app_user_id()
+    )
+  )
+  with check (
+    kind in ('text', 'file')
+    and permission in ('private', 'shared')
+    and size_bytes >= 0
+    and size_bytes <= 102400
+    and octet_length(content) <= 102400
+    and (
+      added_by_id = public.current_app_user_id()
+      or exists (
+        select 1
+        from public.chats c
+        where c.id = context_resources.chat_id
+          and c.owner_id = public.current_app_user_id()
+      )
+    )
+  );
+
+drop policy if exists context_resources_delete_owner_or_chat_owner on public.context_resources;
+create policy context_resources_delete_owner_or_chat_owner on public.context_resources
+  for delete using (
+    added_by_id = public.current_app_user_id()
+    or exists (
+      select 1
+      from public.chats c
+      where c.id = context_resources.chat_id
+        and c.owner_id = public.current_app_user_id()
+    )
+  );
 
 -- ============================================================
 -- api_keys

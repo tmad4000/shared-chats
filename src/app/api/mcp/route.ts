@@ -3,13 +3,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { asc, desc, eq, or } from "drizzle-orm";
+import { and, asc, desc, eq, or } from "drizzle-orm";
 import { authenticateBearerToken } from "@/lib/api-keys";
 import { userCanAccessChat } from "@/lib/access";
 import { withUserDb } from "@/db/client";
-import { chatMembers, chats, messages } from "@/db/schema";
+import { chatMembers, chats, contextResources, messages } from "@/db/schema";
 import { createShareLink } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
+import { listVisibleContextResources, normalizeContextInput } from "@/lib/context";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -55,10 +56,10 @@ export async function OPTIONS() {
 
 function createServer(userId: string, baseUrl: string) {
   const server = new McpServer(
-    { name: "shared-chats", version: "0.0.4" },
+    { name: "shared-chats", version: "0.0.5" },
     {
       capabilities: { tools: {} },
-      instructions: "Use list_chats to discover visible chats. Use share_chat with a chatId to create a join URL.",
+      instructions: "Use list_chats to discover visible chats. Use attach_context to mount small text/file context on a chat. Use share_chat with a chatId to create a join URL.",
     },
   );
 
@@ -116,6 +117,67 @@ function createServer(userId: string, baseUrl: string) {
         return { content: [{ type: "text", text: "Only the chat owner can share this chat." }], isError: true };
       }
       return jsonToolResult(result);
+    },
+  );
+
+  server.registerTool(
+    "list_context",
+    {
+      title: "List Context",
+      description: "List context resources visible to the authenticated user for a chat.",
+      inputSchema: z.object({ chatId: z.string().min(1) }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ chatId }) => {
+      const data = await listContext(userId, chatId);
+      if (!data) {
+        return { content: [{ type: "text", text: "Chat not found or not visible." }], isError: true };
+      }
+      return jsonToolResult({ resources: data });
+    },
+  );
+
+  server.registerTool(
+    "attach_context",
+    {
+      title: "Attach Context",
+      description: "Attach a small text or file context resource to a visible chat. Content must be 100KB or smaller.",
+      inputSchema: z.object({
+        chatId: z.string().min(1),
+        kind: z.enum(["text", "file"]),
+        name: z.string().min(1),
+        content: z.string().min(1),
+        mimeType: z.string().optional(),
+        permission: z.enum(["private", "shared"]).optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    async ({ chatId, kind, name, content, mimeType, permission }) => {
+      const result = await attachContext(userId, chatId, { kind, name, content, mimeType, permission });
+      if (!result.ok) {
+        return { content: [{ type: "text", text: result.error }], isError: true };
+      }
+      return jsonToolResult({ resource: result.resource });
+    },
+  );
+
+  server.registerTool(
+    "remove_context",
+    {
+      title: "Remove Context",
+      description: "Remove a context resource from a chat if the authenticated user uploaded it or owns the chat.",
+      inputSchema: z.object({
+        chatId: z.string().min(1),
+        resourceId: z.string().min(1),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async ({ chatId, resourceId }) => {
+      const removed = await removeContext(userId, chatId, resourceId);
+      if (!removed) {
+        return { content: [{ type: "text", text: "Context not found or not removable." }], isError: true };
+      }
+      return jsonToolResult({ ok: true, resourceId });
     },
   );
 
@@ -200,6 +262,60 @@ async function appendUserMessage(userId: string, chatId: string, content: string
       .returning();
     await tx.update(chats).set({ updatedAt: new Date() }).where(eq(chats.id, chatId));
     return inserted;
+  });
+}
+
+async function listContext(userId: string, chatId: string) {
+  return withUserDb(userId, async (tx) => {
+    if (!(await userCanAccessChat(userId, chatId, tx))) return null;
+    return listVisibleContextResources(tx, chatId);
+  });
+}
+
+async function attachContext(
+  userId: string,
+  chatId: string,
+  input: {
+    kind: "text" | "file";
+    name: string;
+    content: string;
+    mimeType?: string;
+    permission?: "private" | "shared";
+  },
+): Promise<{ ok: true; resource: unknown } | { ok: false; error: string }> {
+  const parsed = normalizeContextInput(input);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+
+  return withUserDb(userId, async (tx) => {
+    if (!(await userCanAccessChat(userId, chatId, tx))) {
+      return { ok: false, error: "Chat not found or not visible." };
+    }
+
+    const [resource] = await tx
+      .insert(contextResources)
+      .values({
+        chatId,
+        addedById: userId,
+        kind: parsed.value.kind,
+        name: parsed.value.name,
+        content: parsed.value.content,
+        mimeType: parsed.value.mimeType,
+        sizeBytes: parsed.value.sizeBytes,
+        permission: parsed.value.permission,
+      })
+      .returning();
+    return { ok: true, resource };
+  });
+}
+
+async function removeContext(userId: string, chatId: string, resourceId: string) {
+  return withUserDb(userId, async (tx) => {
+    if (!(await userCanAccessChat(userId, chatId, tx))) return false;
+    const deleted = await tx
+      .delete(contextResources)
+      .where(and(eq(contextResources.chatId, chatId), eq(contextResources.id, resourceId)))
+      .returning({ id: contextResources.id });
+    return deleted.length > 0;
   });
 }
 

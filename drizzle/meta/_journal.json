@@ -15,6 +15,13 @@
       "when": 1779705665822,
       "tag": "0001_naive_ogun",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779706612692,
+      "tag": "0002_smart_squadron_sinister",
+      "breakpoints": true
     }
   ]
 }
