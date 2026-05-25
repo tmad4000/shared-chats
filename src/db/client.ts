@@ -64,6 +64,19 @@ export async function withUserDb<T>(
   return db.transaction(async (tx) => {
     await tx.execute(sql`select set_config('app.current_user_id', ${userId}, true)`);
     await tx.execute(sql`select set_config('app.current_share_token', ${options?.shareToken ?? ""}, true)`);
+    await tx.execute(sql`select set_config('app.current_api_key_hash', '', true)`);
+    return fn(tx);
+  });
+}
+
+export async function withApiKeyDb<T>(
+  hashedKey: string,
+  fn: (tx: UserScopedDB) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select set_config('app.current_user_id', '', true)`);
+    await tx.execute(sql`select set_config('app.current_share_token', '', true)`);
+    await tx.execute(sql`select set_config('app.current_api_key_hash', ${hashedKey}, true)`);
     return fn(tx);
   });
 }

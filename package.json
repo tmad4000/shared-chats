@@ -1,6 +1,6 @@
 {
   "name": "shared-chats",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -13,11 +13,13 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "drizzle-orm": "latest",
     "next": "^15.0.3",
     "postgres": "^3.4.5",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22",

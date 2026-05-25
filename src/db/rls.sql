@@ -22,6 +22,12 @@ begin
 end;
 $$ language plpgsql stable;
 
+create or replace function public.current_app_api_key_hash() returns text as $$
+begin
+  return nullif(current_setting('app.current_api_key_hash', true), '');
+end;
+$$ language plpgsql stable;
+
 -- ============================================================
 -- chats
 -- ============================================================
@@ -166,4 +172,30 @@ create policy chat_members_insert_join_token on public.chat_members
 
 drop policy if exists chat_members_delete_self_or_owner on public.chat_members;
 create policy chat_members_delete_self_or_owner on public.chat_members
+  for delete using (user_id = public.current_app_user_id());
+
+-- ============================================================
+-- api_keys
+-- ============================================================
+alter table public.api_keys enable row level security;
+alter table public.api_keys force row level security;
+
+drop policy if exists api_keys_select_owner_or_presented_key on public.api_keys;
+create policy api_keys_select_owner_or_presented_key on public.api_keys
+  for select using (
+    user_id = public.current_app_user_id()
+    or hashed_key = public.current_app_api_key_hash()
+  );
+
+drop policy if exists api_keys_insert_owner on public.api_keys;
+create policy api_keys_insert_owner on public.api_keys
+  for insert with check (user_id = public.current_app_user_id());
+
+drop policy if exists api_keys_update_owner on public.api_keys;
+create policy api_keys_update_owner on public.api_keys
+  for update using (user_id = public.current_app_user_id())
+  with check (user_id = public.current_app_user_id());
+
+drop policy if exists api_keys_delete_owner on public.api_keys;
+create policy api_keys_delete_owner on public.api_keys
   for delete using (user_id = public.current_app_user_id());

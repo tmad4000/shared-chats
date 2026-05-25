@@ -54,8 +54,20 @@ export const chatMembers = pgTable("chat_members", {
   pk: primaryKey({ columns: [t.chatId, t.userId] }),
 }));
 
+// ============ api_keys ============
+// Bearer tokens for external MCP/automation callers. Only the SHA-256 hash is stored.
+export const apiKeys = pgTable("api_keys", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  hashedKey: text("hashed_key").notNull().unique(),
+  name: text("name").notNull().default("API key"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+});
+
 export type User = typeof users.$inferSelect;
 export type Chat = typeof chats.$inferSelect;
 export type Message = typeof messages.$inferSelect;
 export type ShareLink = typeof shareLinks.$inferSelect;
 export type ChatMember = typeof chatMembers.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;

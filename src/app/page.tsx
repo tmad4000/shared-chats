@@ -133,7 +133,7 @@ export default async function Home() {
       </section>
 
       <footer style={{ marginTop: 40, color: "var(--text-tertiary)", fontSize: 12, textAlign: "center" }}>
-        v0.0.3 · <a href="https://github.com/tmad4000/shared-chats" style={{ color: "var(--text-tertiary)" }}>github.com/tmad4000/shared-chats</a> · <a href="/api/health" style={{ color: "var(--text-tertiary)" }}>health</a>
+        v0.0.4 · <a href="https://github.com/tmad4000/shared-chats" style={{ color: "var(--text-tertiary)" }}>github.com/tmad4000/shared-chats</a> · <a href="/api/health" style={{ color: "var(--text-tertiary)" }}>health</a>
       </footer>
     </main>
   );
