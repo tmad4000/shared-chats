@@ -42,7 +42,7 @@ export const MCP_TOOLS = [
   {
     name: "send_message",
     title: "Send Message",
-    description: "Append a user message to a visible chat. The in-app agent reply is not invoked by this v0 MCP tool.",
+    description: "Append a user message to a visible chat, invoke Claude, and return both the user message and assistant reply.",
     inputSchema: {
       type: "object",
       properties: {
