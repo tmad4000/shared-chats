@@ -1,6 +1,6 @@
 {
   "name": "shared-chats",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -8,6 +8,7 @@
     "start": "next start",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:rls": "tsx src/db/apply-rls.ts",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {

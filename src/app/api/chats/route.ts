@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { db } from "@/db/client";
+import { withUserDb } from "@/db/client";
 import { chats, chatMembers } from "@/db/schema";
 import { desc, eq, or } from "drizzle-orm";
 
@@ -11,30 +11,32 @@ export async function GET() {
   const user = await getCurrentUser();
   if (!user) return Response.json({ error: "unauthenticated" }, { status: 401 });
 
-  // Owned chats
-  const owned = await db
-    .select()
-    .from(chats)
-    .where(eq(chats.ownerId, user.id))
-    .orderBy(desc(chats.updatedAt))
-    .limit(50);
+  const allChats = await withUserDb(user.id, async (tx) => {
+    const owned = await tx
+      .select()
+      .from(chats)
+      .where(eq(chats.ownerId, user.id))
+      .orderBy(desc(chats.updatedAt))
+      .limit(50);
 
-  // Member-only chats
-  const memberships = await db
-    .select()
-    .from(chatMembers)
-    .where(eq(chatMembers.userId, user.id));
-  const memberIds = memberships.map((m) => m.chatId).filter((id) => !owned.some((c) => c.id === id));
+    const memberships = await tx
+      .select()
+      .from(chatMembers)
+      .where(eq(chatMembers.userId, user.id));
+    const memberIds = memberships.map((m) => m.chatId).filter((id) => !owned.some((c) => c.id === id));
 
-  const memberChats = memberIds.length
-    ? await db
-        .select()
-        .from(chats)
-        .where(or(...memberIds.map((id) => eq(chats.id, id))))
-        .orderBy(desc(chats.updatedAt))
-    : [];
+    const memberChats = memberIds.length
+      ? await tx
+          .select()
+          .from(chats)
+          .where(or(...memberIds.map((id) => eq(chats.id, id))))
+          .orderBy(desc(chats.updatedAt))
+      : [];
 
-  return Response.json({ chats: [...owned, ...memberChats] });
+    return [...owned, ...memberChats];
+  });
+
+  return Response.json({ chats: allChats });
 }
 
 // POST /api/chats — create a new chat
@@ -47,6 +49,9 @@ export async function POST(req: NextRequest) {
     ? body.title.trim()
     : "New chat";
 
-  const [chat] = await db.insert(chats).values({ ownerId: user.id, title }).returning();
+  const chat = await withUserDb(user.id, async (tx) => {
+    const [created] = await tx.insert(chats).values({ ownerId: user.id, title }).returning();
+    return created;
+  });
   return Response.json({ chat });
 }

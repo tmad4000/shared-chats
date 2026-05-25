@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
-import { db } from "@/db/client";
+import { withUserDb } from "@/db/client";
 import { chats, chatMembers } from "@/db/schema";
 import { desc, eq, or } from "drizzle-orm";
 
@@ -11,10 +11,13 @@ async function createChatAction() {
   "use server";
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  const [chat] = await db
-    .insert(chats)
-    .values({ ownerId: user.id, title: "New chat" })
-    .returning();
+  const chat = await withUserDb(user.id, async (tx) => {
+    const [created] = await tx
+      .insert(chats)
+      .values({ ownerId: user.id, title: "New chat" })
+      .returning();
+    return created;
+  });
   redirect(`/chat/${chat.id}`);
 }
 
@@ -22,29 +25,31 @@ export default async function Home() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  const owned = await db
-    .select()
-    .from(chats)
-    .where(eq(chats.ownerId, user.id))
-    .orderBy(desc(chats.updatedAt))
-    .limit(50);
+  const allChats = await withUserDb(user.id, async (tx) => {
+    const owned = await tx
+      .select()
+      .from(chats)
+      .where(eq(chats.ownerId, user.id))
+      .orderBy(desc(chats.updatedAt))
+      .limit(50);
 
-  const memberships = await db
-    .select()
-    .from(chatMembers)
-    .where(eq(chatMembers.userId, user.id));
-  const memberIds = memberships
-    .map((m) => m.chatId)
-    .filter((id) => !owned.some((c) => c.id === id));
-  const memberChats = memberIds.length
-    ? await db
-        .select()
-        .from(chats)
-        .where(or(...memberIds.map((id) => eq(chats.id, id))))
-        .orderBy(desc(chats.updatedAt))
-    : [];
+    const memberships = await tx
+      .select()
+      .from(chatMembers)
+      .where(eq(chatMembers.userId, user.id));
+    const memberIds = memberships
+      .map((m) => m.chatId)
+      .filter((id) => !owned.some((c) => c.id === id));
+    const memberChats = memberIds.length
+      ? await tx
+          .select()
+          .from(chats)
+          .where(or(...memberIds.map((id) => eq(chats.id, id))))
+          .orderBy(desc(chats.updatedAt))
+      : [];
 
-  const allChats = [...owned, ...memberChats];
+    return [...owned, ...memberChats];
+  });
 
   return (
     <main style={{ maxWidth: 720, margin: "0 auto", padding: "60px 24px 40px" }}>
@@ -128,7 +133,7 @@ export default async function Home() {
       </section>
 
       <footer style={{ marginTop: 40, color: "var(--text-tertiary)", fontSize: 12, textAlign: "center" }}>
-        v0.0.2 · <a href="https://github.com/tmad4000/shared-chats" style={{ color: "var(--text-tertiary)" }}>github.com/tmad4000/shared-chats</a> · <a href="/api/health" style={{ color: "var(--text-tertiary)" }}>health</a>
+        v0.0.3 · <a href="https://github.com/tmad4000/shared-chats" style={{ color: "var(--text-tertiary)" }}>github.com/tmad4000/shared-chats</a> · <a href="/api/health" style={{ color: "var(--text-tertiary)" }}>health</a>
       </footer>
     </main>
   );

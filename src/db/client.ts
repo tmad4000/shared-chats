@@ -1,4 +1,5 @@
 import { drizzle } from "drizzle-orm/postgres-js";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import * as schema from "./schema";
 
@@ -53,3 +54,16 @@ export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
 });
 
 export type DB = ReturnType<typeof drizzle<typeof schema>>;
+export type UserScopedDB = Parameters<Parameters<DB["transaction"]>[0]>[0];
+
+export async function withUserDb<T>(
+  userId: string,
+  fn: (tx: UserScopedDB) => Promise<T>,
+  options?: { shareToken?: string },
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select set_config('app.current_user_id', ${userId}, true)`);
+    await tx.execute(sql`select set_config('app.current_share_token', ${options?.shareToken ?? ""}, true)`);
+    return fn(tx);
+  });
+}

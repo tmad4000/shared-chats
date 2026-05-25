@@ -2,11 +2,37 @@ import { NextRequest } from "next/server";
 import crypto from "node:crypto";
 import { getCurrentUser } from "@/lib/auth";
 import { userCanAdminChat } from "@/lib/access";
-import { db } from "@/db/client";
+import { withUserDb } from "@/db/client";
 import { shareLinks } from "@/db/schema";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
+
+// GET /api/chats/:id/share — list active share links for owners.
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const user = await getCurrentUser();
+  if (!user) return Response.json({ error: "unauthenticated" }, { status: 401 });
+
+  const { id: chatId } = await ctx.params;
+  return withUserDb(user.id, async (tx) => {
+    if (!(await userCanAdminChat(user.id, chatId, tx))) {
+      return Response.json({ error: "only the owner can manage share links" }, { status: 403 });
+    }
+
+    const links = await tx
+      .select()
+      .from(shareLinks)
+      .where(and(eq(shareLinks.chatId, chatId), isNull(shareLinks.revokedAt)))
+      .orderBy(asc(shareLinks.createdAt));
+
+    return Response.json({
+      links: links.map((link) => ({
+        token: link.token,
+        createdAt: link.createdAt,
+      })),
+    });
+  });
+}
 
 // POST /api/chats/:id/share — create (or return existing) share link.
 // THIS IS THE CORE SHARE ENDPOINT — exposed to UI button, agent tool, MCP, CLI.
@@ -20,42 +46,44 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!user) return Response.json({ error: "unauthenticated" }, { status: 401 });
 
   const { id: chatId } = await ctx.params;
-  if (!(await userCanAdminChat(user.id, chatId))) {
-    return Response.json({ error: "only the owner can share" }, { status: 403 });
-  }
-
   const body = await req.json().catch(() => ({} as Record<string, unknown>));
   const reuse = body?.reuse !== false; // default true
 
-  if (reuse) {
-    const existing = (
-      await db
-        .select()
-        .from(shareLinks)
-        .where(and(eq(shareLinks.chatId, chatId), isNull(shareLinks.revokedAt)))
-        .limit(1)
-    )[0];
-    if (existing) {
-      return Response.json({
-        token: existing.token,
-        url: buildShareUrl(req, existing.token),
-        createdAt: existing.createdAt,
-        reused: true,
-      });
+  return withUserDb(user.id, async (tx) => {
+    if (!(await userCanAdminChat(user.id, chatId, tx))) {
+      return Response.json({ error: "only the owner can share" }, { status: 403 });
     }
-  }
 
-  const token = generateToken();
-  const [created] = await db
-    .insert(shareLinks)
-    .values({ token, chatId, createdById: user.id })
-    .returning();
+    if (reuse) {
+      const existing = (
+        await tx
+          .select()
+          .from(shareLinks)
+          .where(and(eq(shareLinks.chatId, chatId), isNull(shareLinks.revokedAt)))
+          .limit(1)
+      )[0];
+      if (existing) {
+        return Response.json({
+          token: existing.token,
+          url: buildShareUrl(req, existing.token),
+          createdAt: existing.createdAt,
+          reused: true,
+        });
+      }
+    }
 
-  return Response.json({
-    token: created.token,
-    url: buildShareUrl(req, created.token),
-    createdAt: created.createdAt,
-    reused: false,
+    const token = generateToken();
+    const [created] = await tx
+      .insert(shareLinks)
+      .values({ token, chatId, createdById: user.id })
+      .returning();
+
+    return Response.json({
+      token: created.token,
+      url: buildShareUrl(req, created.token),
+      createdAt: created.createdAt,
+      reused: false,
+    });
   });
 }
 

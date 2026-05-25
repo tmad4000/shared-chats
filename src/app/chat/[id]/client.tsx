@@ -6,8 +6,7 @@ import type { Chat, Message } from "@/db/schema";
 
 type Member = { id: string; email: string; name: string | null; isOwner: boolean };
 type CurrentUser = { id: string; email: string; name: string | null };
-
-const POLL_MS = 2000;
+type ShareLink = { token: string; createdAt: string | Date };
 
 export function ChatClient({
   chat,
@@ -25,46 +24,42 @@ export function ChatClient({
   const [sending, setSending] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [shareStatus, setShareStatus] = useState<"idle" | "loading" | "copied" | "error">("idle");
+  const [sharePanelOpen, setSharePanelOpen] = useState(false);
+  const [shareLinks, setShareLinks] = useState<ShareLink[]>([]);
+  const [linksLoading, setLinksLoading] = useState(false);
+  const [revokingToken, setRevokingToken] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const lastTimestampRef = useRef<string | null>(
-    initialMessages.length > 0 ? new Date(initialMessages[initialMessages.length - 1].createdAt).toISOString() : null,
-  );
+  const isOwner = chat.ownerId === currentUser.id;
 
   // Scroll to bottom on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [msgs.length]);
 
-  // Poll for new messages every POLL_MS
+  // Stream messages. The browser handles reconnects for EventSource.
   useEffect(() => {
-    let active = true;
-    async function poll() {
-      try {
-        const url = lastTimestampRef.current
-          ? `/api/chats/${chat.id}/messages?after=${encodeURIComponent(lastTimestampRef.current)}`
-          : `/api/chats/${chat.id}/messages`;
-        const r = await fetch(url, { cache: "no-store" });
-        if (!r.ok) return;
-        const j = await r.json();
-        const newMsgs: Message[] = j.messages ?? [];
-        if (newMsgs.length > 0 && active) {
-          setMsgs((prev) => {
-            const seen = new Set(prev.map((m) => m.id));
-            const additions = newMsgs.filter((m) => !seen.has(m.id));
-            if (additions.length === 0) return prev;
-            const next = [...prev, ...additions];
-            lastTimestampRef.current = new Date(next[next.length - 1].createdAt).toISOString();
-            return next;
-          });
-        }
-      } catch {}
+    if (typeof EventSource === "undefined") {
+      return;
     }
-    const interval = setInterval(poll, POLL_MS);
+
+    const events = new EventSource(`/api/chats/${chat.id}/messages/stream`);
+    events.addEventListener("message", (event) => {
+      try {
+        const msg = JSON.parse(event.data) as Message;
+        setMsgs((prev) => mergeMessages(prev, [msg]));
+      } catch {}
+    });
+
     return () => {
-      active = false;
-      clearInterval(interval);
+      events.close();
     };
   }, [chat.id]);
+
+  useEffect(() => {
+    if (isOwner && sharePanelOpen) {
+      void loadShareLinks();
+    }
+  }, [isOwner, sharePanelOpen]);
 
   async function send(e: FormEvent) {
     e.preventDefault();
@@ -79,25 +74,26 @@ export function ChatClient({
         body: JSON.stringify({ content }),
       });
       if (!r.ok) throw new Error("send failed");
-      const j = await r.json();
-      const additions: Message[] = [];
-      if (j.message) additions.push(j.message);
-      if (j.reply) additions.push(j.reply);
-      setMsgs((prev) => {
-        const seen = new Set(prev.map((m) => m.id));
-        const newOnes = additions.filter((m) => !seen.has(m.id));
-        const next = [...prev, ...newOnes];
-        if (next.length > 0) {
-          lastTimestampRef.current = new Date(next[next.length - 1].createdAt).toISOString();
-        }
-        return next;
-      });
     } catch (e) {
       console.error(e);
       // restore the input on failure
       setInput(content);
     } finally {
       setSending(false);
+    }
+  }
+
+  async function loadShareLinks() {
+    setLinksLoading(true);
+    try {
+      const r = await fetch(`/api/chats/${chat.id}/share`, { cache: "no-store" });
+      if (!r.ok) throw new Error("list links failed");
+      const j = await r.json();
+      setShareLinks(j.links ?? []);
+    } catch {
+      setShareLinks([]);
+    } finally {
+      setLinksLoading(false);
     }
   }
 
@@ -108,6 +104,8 @@ export function ChatClient({
       if (!r.ok) throw new Error("share failed");
       const j = await r.json();
       setShareUrl(j.url);
+      setSharePanelOpen(true);
+      await loadShareLinks();
       try {
         await navigator.clipboard.writeText(j.url);
         setShareStatus("copied");
@@ -121,7 +119,35 @@ export function ChatClient({
     }
   }
 
-  const isOwner = chat.ownerId === currentUser.id;
+  async function copyLink(token: string) {
+    const url = buildShareUrl(token);
+    setShareUrl(url);
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareStatus("copied");
+      setTimeout(() => setShareStatus("idle"), 1800);
+    } catch {
+      setShareStatus("idle");
+    }
+  }
+
+  async function revoke(token: string) {
+    setRevokingToken(token);
+    try {
+      const r = await fetch(`/api/chats/${chat.id}/share/${encodeURIComponent(token)}`, {
+        method: "DELETE",
+      });
+      if (!r.ok) throw new Error("revoke failed");
+      setShareLinks((prev) => prev.filter((link) => link.token !== token));
+      if (shareUrl?.endsWith(`/c/${token}`)) setShareUrl(null);
+    } finally {
+      setRevokingToken(null);
+    }
+  }
+
+  function buildShareUrl(token: string) {
+    return `${window.location.origin}/c/${token}`;
+  }
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -160,21 +186,35 @@ export function ChatClient({
         </div>
 
         {isOwner && (
-          <button
-            onClick={share}
-            disabled={shareStatus === "loading"}
-            style={{
-              background: shareStatus === "copied" ? "#4a8c42" : "var(--accent)",
-              color: "white", border: 0,
-              padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-              cursor: "pointer", fontFamily: "inherit",
-            }}
-          >
-            {shareStatus === "loading" ? "Sharing…" :
-             shareStatus === "copied" ? "✓ Copied" :
-             shareStatus === "error" ? "Failed" :
-             "⤴ Share"}
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={() => setSharePanelOpen((open) => !open)}
+              style={{
+                background: "transparent",
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border)",
+                padding: "8px 12px", borderRadius: 8, fontSize: 13, fontWeight: 500,
+                cursor: "pointer", fontFamily: "inherit",
+              }}
+            >
+              Links
+            </button>
+            <button
+              onClick={share}
+              disabled={shareStatus === "loading"}
+              style={{
+                background: shareStatus === "copied" ? "#4a8c42" : "var(--accent)",
+                color: "white", border: 0,
+                padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500,
+                cursor: "pointer", fontFamily: "inherit",
+              }}
+            >
+              {shareStatus === "loading" ? "Sharing..." :
+               shareStatus === "copied" ? "Copied" :
+               shareStatus === "error" ? "Failed" :
+               "Share"}
+            </button>
+          </div>
         )}
       </header>
 
@@ -189,6 +229,86 @@ export function ChatClient({
           <strong>Share link:</strong>{" "}
           <code style={{ background: "white", padding: "2px 8px", borderRadius: 4 }}>{shareUrl}</code>{" "}
           — anyone with this link can join and chat
+        </div>
+      )}
+
+      {isOwner && sharePanelOpen && (
+        <div style={{
+          padding: "14px 24px 16px",
+          background: "rgba(255, 255, 255, 0.74)",
+          borderBottom: "1px solid var(--border)",
+        }}>
+          <div style={{ maxWidth: 820, margin: "0 auto" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 10 }}>
+              <strong style={{ fontSize: 13 }}>Manage share links</strong>
+              <span style={{ color: "var(--text-tertiary)", fontSize: 12 }}>
+                {linksLoading ? "Loading..." : `${shareLinks.length} active`}
+              </span>
+            </div>
+            {shareLinks.length === 0 && !linksLoading ? (
+              <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                No active links. Create one with Share.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {shareLinks.map((link) => (
+                  <div
+                    key={link.token}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0, 1fr) auto auto",
+                      gap: 10,
+                      alignItems: "center",
+                      background: "var(--bg-card)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      padding: "9px 10px",
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {link.token}
+                      </code>
+                      <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
+                        Created {new Date(link.createdAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => copyLink(link.token)}
+                      style={{
+                        border: "1px solid var(--border)",
+                        background: "transparent",
+                        color: "var(--text-secondary)",
+                        padding: "6px 10px",
+                        borderRadius: 7,
+                        cursor: "pointer",
+                        font: "inherit",
+                        fontSize: 12,
+                      }}
+                    >
+                      Copy
+                    </button>
+                    <button
+                      onClick={() => revoke(link.token)}
+                      disabled={revokingToken === link.token}
+                      style={{
+                        border: "1px solid rgba(150, 40, 40, 0.22)",
+                        background: "rgba(150, 40, 40, 0.06)",
+                        color: "#963030",
+                        padding: "6px 10px",
+                        borderRadius: 7,
+                        cursor: revokingToken === link.token ? "wait" : "pointer",
+                        font: "inherit",
+                        fontSize: 12,
+                      }}
+                    >
+                      {revokingToken === link.token ? "Revoking..." : "Revoke"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -287,5 +407,13 @@ export function ChatClient({
         </div>
       </form>
     </div>
+  );
+}
+
+function mergeMessages(current: Message[], incoming: Message[]) {
+  const byId = new Map(current.map((m) => [m.id, m]));
+  for (const msg of incoming) byId.set(msg.id, msg);
+  return Array.from(byId.values()).sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
   );
 }
