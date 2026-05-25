@@ -10,10 +10,16 @@ import { withUserDb } from "@/db/client";
 import { chatMembers, chats, contextResources, messages } from "@/db/schema";
 import { createShareLink } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
-import { listVisibleContextResources, normalizeContextInput } from "@/lib/context";
+import { buildSystemPromptWithContext, listVisibleContextResources, normalizeContextInput } from "@/lib/context";
 import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
 import { checkBudget } from "@/lib/budget";
 import { check as checkRateLimit } from "@/lib/rate-limit";
+import {
+  createClaudeMessage,
+  extractText,
+  SYSTEM_PROMPT,
+  type ClaudeMessageParam,
+} from "@/lib/anthropic";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -236,7 +242,7 @@ function createServer(userId: string, baseUrl: string, auditMeta: AuditRequestMe
     "send_message",
     {
       title: "Send Message",
-      description: "Append a user message to a visible chat. This v0 tool does not invoke the in-app Claude reply.",
+      description: "Append a user message to a visible chat, invoke Claude, and return both the user message and assistant reply.",
       inputSchema: z.object({
         chatId: z.string().min(1),
         content: z.string().min(1),
@@ -300,7 +306,9 @@ function createServer(userId: string, baseUrl: string, auditMeta: AuditRequestMe
         meta: { messageId: created.id, contentLength: created.content.length, surface: "mcp" },
         ...auditMeta,
       });
-      return jsonToolResult({ message: created });
+
+      const reply = await createAssistantReply(userId, chatId);
+      return jsonToolResult({ message: created, reply });
     },
   );
 
@@ -361,6 +369,45 @@ async function appendUserMessage(userId: string, chatId: string, content: string
         authorId: userId,
         role: "user",
         content: content.trim(),
+      })
+      .returning();
+    await tx.update(chats).set({ updatedAt: new Date() }).where(eq(chats.id, chatId));
+    return inserted;
+  });
+}
+
+async function createAssistantReply(userId: string, chatId: string) {
+  const replyInput = await withUserDb(userId, async (tx) => {
+    const history = await tx
+      .select()
+      .from(messages)
+      .where(eq(messages.chatId, chatId))
+      .orderBy(asc(messages.createdAt));
+    const resources = await listVisibleContextResources(tx, chatId);
+    return { history, resources };
+  });
+
+  const turns: ClaudeMessageParam[] = replyInput.history.map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content,
+  }));
+  const systemPrompt = buildSystemPromptWithContext(SYSTEM_PROMPT, replyInput.resources);
+  const resp = await createClaudeMessage(turns, {
+    systemPrompt,
+    billedUserId: userId,
+    chatId,
+    toolsEnabled: false,
+  });
+  const content = extractText(resp) || "(No reply)";
+
+  return withUserDb(userId, async (tx) => {
+    const [inserted] = await tx
+      .insert(messages)
+      .values({
+        chatId,
+        authorId: null,
+        role: "assistant",
+        content,
       })
       .returning();
     await tx.update(chats).set({ updatedAt: new Date() }).where(eq(chats.id, chatId));

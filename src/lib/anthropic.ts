@@ -62,7 +62,7 @@ export async function generateReply(
 
 export async function createClaudeMessage(
   messages: ClaudeMessageParam[],
-  options?: { systemPrompt?: string; billedUserId?: string; chatId?: string },
+  options?: { systemPrompt?: string; billedUserId?: string; chatId?: string; toolsEnabled?: boolean },
 ): Promise<ClaudeMessage> {
   if (!apiKey) {
     return {
@@ -93,8 +93,7 @@ export async function createClaudeMessage(
     max_tokens: 2048,
     system: options?.systemPrompt ?? SYSTEM_PROMPT,
     messages,
-    tools: [SHARE_CHAT_TOOL],
-    tool_choice: { type: "auto" },
+    ...(options?.toolsEnabled === false ? {} : { tools: [SHARE_CHAT_TOOL], tool_choice: { type: "auto" as const } }),
   });
 
   if (options?.billedUserId && options.chatId) {
