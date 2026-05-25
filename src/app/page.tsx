@@ -52,88 +52,56 @@ export default async function Home() {
   });
 
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: "60px 24px 40px" }}>
-      <header style={{ display: "flex", alignItems: "baseline", marginBottom: 36, gap: 16 }}>
-        <h1 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 40, letterSpacing: "-0.02em", flex: 1 }}>
-          Shared Chats
-        </h1>
-        <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+    <main className="page-shell">
+      <header className="page-header">
+        <h1 className="page-title">Shared Chats</h1>
+        <span className="page-user">
           {user.name || user.email} ·{" "}
           <form action="/api/auth/logout" method="post" style={{ display: "inline" }}>
-            <button type="submit" style={{
-              border: 0, background: "transparent", color: "var(--accent)", cursor: "pointer",
-              padding: 0, font: "inherit", fontSize: 13,
-            }}>sign out</button>
+            <button type="submit" className="link-button">sign out</button>
           </form>
         </span>
       </header>
 
-      <section style={{
-        background: "var(--bg-card)",
-        border: "1px solid var(--border)",
-        borderRadius: 12,
-        padding: 24,
-        marginBottom: 20,
-      }}>
-        <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 22, marginBottom: 4 }}>
-          Start a new chat
-        </h2>
-        <p style={{ color: "var(--text-secondary)", fontSize: 14, marginBottom: 14 }}>
+      <section className="surface-card home-card">
+        <h2 className="section-title">Start a new chat</h2>
+        <p className="muted-text" style={{ fontSize: 14, marginBottom: 14 }}>
           Start a conversation with Claude. Share it with teammates anytime.
         </p>
         <form action={createChatAction}>
-          <button type="submit" style={{
-            background: "var(--accent)", color: "white", border: 0,
-            padding: "10px 20px", borderRadius: 8, fontSize: 14, fontWeight: 500,
-            cursor: "pointer", fontFamily: "inherit",
-          }}>
-            + New chat
-          </button>
+          <button type="submit" className="primary-button tap-target">New chat</button>
         </form>
       </section>
 
       <section>
-        <h2 style={{ fontFamily: "'DM Serif Display', serif", fontSize: 22, marginBottom: 12 }}>
-          Your chats
-        </h2>
+        <h2 className="section-title">Your chats</h2>
         {allChats.length === 0 ? (
-          <p style={{ color: "var(--text-tertiary)", fontSize: 14 }}>No chats yet — start one above.</p>
+          <p className="empty-panel">
+            No chats yet. Start a private Claude thread, then invite collaborators when it is useful.
+          </p>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div className="chat-link-list">
             {allChats.map((c) => (
               <Link
                 key={c.id}
                 href={`/chat/${c.id}`}
-                style={{
-                  background: "var(--bg-card)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 10,
-                  padding: "12px 16px",
-                  textDecoration: "none",
-                  color: "var(--text-primary)",
-                  display: "flex", alignItems: "baseline", gap: 12,
-                }}
+                className="surface-card chat-list-link tap-target"
               >
-                <span style={{ fontWeight: 500, flex: 1 }}>{c.title}</span>
-                <span style={{
-                  fontSize: 11,
-                  color: c.ownerId === user.id ? "var(--accent)" : "var(--text-tertiary)",
-                  background: c.ownerId === user.id ? "var(--accent-bg)" : "transparent",
-                  padding: "1px 8px", borderRadius: 4,
-                }}>
+                <strong>{c.title}</strong>
+                <span className={`role-pill ${c.ownerId === user.id ? "owner" : "member"}`}>
                   {c.ownerId === user.id ? "owner" : "member"}
                 </span>
-                <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>
+                <time className="muted-text" style={{ fontSize: 12 }}>
                   {new Date(c.updatedAt).toLocaleString()}
-                </span>
+                </time>
               </Link>
             ))}
           </div>
         )}
       </section>
 
-      <footer style={{ marginTop: 40, color: "var(--text-tertiary)", fontSize: 12, textAlign: "center" }}>
-        v0.0.6 · <a href="https://github.com/tmad4000/shared-chats" style={{ color: "var(--text-tertiary)" }}>github.com/tmad4000/shared-chats</a> · <a href="/api/health" style={{ color: "var(--text-tertiary)" }}>health</a>
+      <footer className="app-footer">
+        v0.0.7 · <a href="https://github.com/tmad4000/shared-chats">github.com/tmad4000/shared-chats</a> · <a href="/api/health">health</a>
       </footer>
     </main>
   );

@@ -43,38 +43,15 @@ export default function LoginPage() {
   }
 
   return (
-    <main style={{
-      maxWidth: 440,
-      margin: "0 auto",
-      padding: "80px 24px",
-    }}>
-      <h1 style={{
-        fontFamily: "'DM Serif Display', serif",
-        fontSize: 40,
-        letterSpacing: "-0.02em",
-        marginBottom: 12,
-      }}>
-        Shared Chats
-      </h1>
-      <p style={{
-        color: "var(--text-secondary)",
-        fontSize: 15,
-        marginBottom: 32,
-      }}>
-        v0.0.2 MVP · enter your email to start chatting. No password. Trust on first use.
+    <main className="auth-shell">
+      <h1 className="auth-title">Shared Chats</h1>
+      <p className="auth-copy" style={{ fontSize: 15, marginBottom: 32 }}>
+        v0.0.7 MVP · enter your email to start chatting. No password. Trust on first use.
       </p>
 
-      <form onSubmit={submit} style={{
-        background: "var(--bg-card)",
-        border: "1px solid var(--border)",
-        borderRadius: 12,
-        padding: 24,
-        display: "flex",
-        flexDirection: "column",
-        gap: 14,
-      }}>
-        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-secondary)" }}>Email</span>
+      <form onSubmit={submit} className="surface-card form-card">
+        <label className="form-label">
+          <span>Email</span>
           <input
             type="email"
             autoFocus
@@ -82,66 +59,33 @@ export default function LoginPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@example.com"
-            style={{
-              padding: "10px 12px",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              fontSize: 15,
-              fontFamily: "inherit",
-            }}
+            className="field tap-target"
           />
         </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-secondary)" }}>
-            Display name <span style={{ color: "var(--text-tertiary)" }}>(optional)</span>
+        <label className="form-label">
+          <span>
+            Display name <span className="muted-text">(optional)</span>
           </span>
           <input
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Jacob"
-            style={{
-              padding: "10px 12px",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              fontSize: 15,
-              fontFamily: "inherit",
-            }}
+            className="field tap-target"
           />
         </label>
-        {err && (
-          <div style={{
-            padding: "8px 12px",
-            background: "rgba(194, 120, 92, 0.10)",
-            color: "#c2785c",
-            borderRadius: 6,
-            fontSize: 13,
-          }}>{err}</div>
-        )}
+        {err && <div className="inline-error">{err}</div>}
         <button
           type="submit"
           disabled={busy || !email}
-          style={{
-            background: "var(--accent)",
-            color: "white",
-            border: 0,
-            padding: "12px 20px",
-            borderRadius: 8,
-            fontSize: 15,
-            fontWeight: 500,
-            cursor: busy ? "wait" : "pointer",
-            fontFamily: "inherit",
-            opacity: busy ? 0.6 : 1,
-          }}
+          className="primary-button tap-target"
         >
           {busy ? "Signing in…" : "Continue"}
         </button>
       </form>
 
-      <p style={{
-        marginTop: 24, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center",
-      }}>
-        v0.0.2 · <a href="https://github.com/tmad4000/shared-chats" style={{ color: "var(--text-tertiary)" }}>tmad4000/shared-chats</a>
+      <p className="app-footer" style={{ marginTop: 24 }}>
+        v0.0.7 · <a href="https://github.com/tmad4000/shared-chats">tmad4000/shared-chats</a>
       </p>
     </main>
   );

@@ -5,8 +5,8 @@ import { withUserDb } from "@/db/client";
 import { chats, messages } from "@/db/schema";
 import { and, asc, eq, gt } from "drizzle-orm";
 import {
-  createClaudeMessage,
   extractText,
+  streamClaudeMessage,
   SYSTEM_PROMPT,
   type ClaudeMessageParam,
   type ClaudeToolUseBlock,
@@ -17,6 +17,7 @@ import { buildSystemPromptWithContext, listVisibleContextResources } from "@/lib
 import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
 import { checkBudget } from "@/lib/budget";
 import { check as checkRateLimit, retryAfterSeconds } from "@/lib/rate-limit";
+import { broadcastChatEvent } from "@/lib/message-stream";
 
 export const dynamic = "force-dynamic";
 
@@ -128,6 +129,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     meta: { messageId: userMsg.id, contentLength: userMsg.content.length, surface: "rest" },
     ...auditMeta,
   });
+  broadcastChatEvent(chatId, { type: "message", message: userMsg });
 
   let assistantMsg = null;
   try {
@@ -147,7 +149,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     }));
 
     const systemPrompt = buildSystemPromptWithContext(SYSTEM_PROMPT, replyInput.resources);
-    const reply = await generateReplyWithTools(turns, chatId, user.id, getRequestOrigin(req), systemPrompt, auditMeta);
+    const reply = await generateReplyWithTools(
+      turns,
+      chatId,
+      user.id,
+      getRequestOrigin(req),
+      systemPrompt,
+      auditMeta,
+      (delta) => broadcastChatEvent(chatId, { type: "assistant.delta", delta }),
+    );
     assistantMsg = await withUserDb(user.id, async (tx) => {
       const [inserted] = await tx
         .insert(messages)
@@ -161,9 +171,24 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       await tx.update(chats).set({ updatedAt: new Date() }).where(eq(chats.id, chatId));
       return inserted;
     });
+    if (assistantMsg) {
+      broadcastChatEvent(chatId, { type: "message", message: assistantMsg });
+      broadcastChatEvent(chatId, { type: "assistant.done" });
+    }
   } catch (e) {
     console.error("[anthropic] reply failed", e);
-    // Don't fail the whole request — user message is saved; agent message can retry.
+    broadcastChatEvent(chatId, {
+      type: "assistant.error",
+      message: "Claude failed to respond. Your message was saved.",
+    });
+    return Response.json(
+      {
+        message: userMsg,
+        reply: null,
+        error: { code: "assistant_failed", message: "Claude failed to respond. Your message was saved." },
+      },
+      { status: 502 },
+    );
   }
 
   return Response.json({ message: userMsg, reply: assistantMsg });
@@ -176,11 +201,12 @@ async function generateReplyWithTools(
   baseUrl: string,
   systemPrompt: string,
   auditMeta: AuditRequestMeta,
+  onDelta: (delta: string) => void,
 ): Promise<string> {
   const messages = [...conversation];
 
   for (let i = 0; i < 3; i++) {
-    const resp = await createClaudeMessage(messages, { systemPrompt, billedUserId: userId, chatId });
+    const resp = await streamClaudeMessage(messages, onDelta, { systemPrompt, billedUserId: userId, chatId });
     const toolUses = resp.content.filter((block): block is ClaudeToolUseBlock => block.type === "tool_use");
 
     if (toolUses.length === 0) {

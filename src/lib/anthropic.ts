@@ -39,6 +39,12 @@ export const SHARE_CHAT_TOOL: Anthropic.Tool = {
 export type ClaudeMessageParam = Anthropic.MessageParam;
 export type ClaudeMessage = Anthropic.Message;
 export type ClaudeToolUseBlock = Anthropic.ToolUseBlock;
+type ClaudeOptions = {
+  systemPrompt?: string;
+  billedUserId?: string;
+  chatId?: string;
+  toolsEnabled?: boolean;
+};
 
 export async function generateReply(
   history: Array<{ role: "user" | "assistant"; content: string }>,
@@ -62,7 +68,7 @@ export async function generateReply(
 
 export async function createClaudeMessage(
   messages: ClaudeMessageParam[],
-  options?: { systemPrompt?: string; billedUserId?: string; chatId?: string; toolsEnabled?: boolean },
+  options?: ClaudeOptions,
 ): Promise<ClaudeMessage> {
   if (!apiKey) {
     return {
@@ -96,6 +102,57 @@ export async function createClaudeMessage(
     ...(options?.toolsEnabled === false ? {} : { tools: [SHARE_CHAT_TOOL], tool_choice: { type: "auto" as const } }),
   });
 
+  if (options?.billedUserId && options.chatId) {
+    await logUsageEvent({
+      userId: options.billedUserId,
+      chatId: options.chatId,
+      inputTokens: resp.usage.input_tokens ?? 0,
+      outputTokens: resp.usage.output_tokens ?? 0,
+    });
+  }
+
+  return resp;
+}
+
+export async function streamClaudeMessage(
+  messages: ClaudeMessageParam[],
+  onDelta: (delta: string) => void,
+  options?: ClaudeOptions,
+): Promise<ClaudeMessage> {
+  if (!apiKey) {
+    const text = "(Demo mode — no ANTHROPIC_API_KEY configured. Set the env var in Cloud Run.)";
+    onDelta(text);
+    return {
+      id: "demo",
+      type: "message",
+      role: "assistant",
+      model: CLAUDE_MODEL,
+      content: [{ type: "text", text }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 0,
+        server_tool_use: null,
+      },
+    } as ClaudeMessage;
+  }
+
+  const stream = anthropic.messages
+    .stream({
+      model: CLAUDE_MODEL,
+      max_tokens: 2048,
+      system: options?.systemPrompt ?? SYSTEM_PROMPT,
+      messages,
+      ...(options?.toolsEnabled === false ? {} : { tools: [SHARE_CHAT_TOOL], tool_choice: { type: "auto" as const } }),
+    })
+    .on("text", (text) => {
+      onDelta(text);
+    });
+
+  const resp = await stream.finalMessage();
   if (options?.billedUserId && options.chatId) {
     await logUsageEvent({
       userId: options.billedUserId,

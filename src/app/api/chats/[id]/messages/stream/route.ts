@@ -3,6 +3,7 @@ import { userCanAccessChat } from "@/lib/access";
 import { withUserDb } from "@/db/client";
 import { messages } from "@/db/schema";
 import { asc, eq } from "drizzle-orm";
+import { subscribeToChatStream, type ChatStreamEvent } from "@/lib/message-stream";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,9 +23,32 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   const seen = new Set<string>();
   let closed = false;
   let interval: ReturnType<typeof setInterval> | null = null;
+  let unsubscribe: (() => void) | null = null;
 
   const stream = new ReadableStream({
     async start(controller) {
+      function sendEvent(eventName: string, data: unknown) {
+        if (closed) return;
+        controller.enqueue(encoder.encode(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`));
+      }
+
+      function emitBroadcast(event: ChatStreamEvent) {
+        if (event.type === "message") {
+          seen.add(event.message.id);
+          sendEvent("message", event.message);
+          return;
+        }
+        if (event.type === "assistant.delta") {
+          sendEvent("assistant.delta", { delta: event.delta });
+          return;
+        }
+        if (event.type === "assistant.error") {
+          sendEvent("assistant.error", { message: event.message });
+          return;
+        }
+        sendEvent("assistant.done", {});
+      }
+
       async function emitNewMessages() {
         if (closed) return;
         try {
@@ -39,17 +63,16 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
           for (const row of rows) {
             if (seen.has(row.id)) continue;
             seen.add(row.id);
-            controller.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(row)}\n\n`));
+            sendEvent("message", row);
           }
         } catch (error) {
-          controller.enqueue(
-            encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "stream query failed" })}\n\n`),
-          );
+          sendEvent("error", { error: "stream query failed" });
           console.error("[messages:stream] query failed", error);
         }
       }
 
       controller.enqueue(encoder.encode(": connected\n\n"));
+      unsubscribe = subscribeToChatStream(chatId, emitBroadcast);
       await emitNewMessages();
       interval = setInterval(() => {
         controller.enqueue(encoder.encode(": keep-alive\n\n"));
@@ -59,6 +82,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     cancel() {
       closed = true;
       if (interval) clearInterval(interval);
+      if (unsubscribe) unsubscribe();
     },
   });
 

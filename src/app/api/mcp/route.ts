@@ -65,7 +65,7 @@ export async function OPTIONS() {
 
 function createServer(userId: string, baseUrl: string, auditMeta: AuditRequestMeta) {
   const server = new McpServer(
-    { name: "shared-chats", version: "0.0.6" },
+    { name: "shared-chats", version: "0.0.7" },
     {
       capabilities: { tools: {} },
       instructions: "Use list_chats to discover visible chats. Use attach_context to mount small text/file context on a chat. Use share_chat with a chatId to create a join URL.",

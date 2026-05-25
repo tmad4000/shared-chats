@@ -4,7 +4,7 @@ export async function GET() {
   return Response.json({
     status: "ok",
     service: "shared-chats",
-    version: "0.0.6",
+    version: "0.0.7",
     timestamp: new Date().toISOString(),
   });
 }

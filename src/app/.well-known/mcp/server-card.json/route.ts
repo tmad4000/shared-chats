@@ -5,7 +5,7 @@ export const dynamic = "force-static";
 export async function GET() {
   return Response.json({
     name: "shared-chats",
-    version: "0.0.6",
+    version: "0.0.7",
     description: "Multiplayer Claude chat workspaces with shareable chat sessions.",
     mcp: {
       endpoint: "/api/mcp",

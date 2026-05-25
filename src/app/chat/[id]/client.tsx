@@ -21,18 +21,16 @@ type ContextResource = {
   addedByName?: string | null;
   addedByEmail?: string | null;
 };
+type SendError = {
+  code: "rate_limited" | "daily_budget_exceeded" | "assistant_failed" | "send_failed";
+  message: string;
+  content: string;
+  retryAfterMs?: number;
+  resetAt?: string;
+};
+type Toast = { id: number; tone: "success" | "error" | "info"; message: string };
 
 const MAX_CONTEXT_BYTES = 100 * 1024;
-const smallButtonStyle = {
-  border: "1px solid var(--border)",
-  background: "transparent",
-  color: "var(--text-secondary)",
-  padding: "6px 10px",
-  borderRadius: 7,
-  cursor: "pointer",
-  font: "inherit",
-  fontSize: 12,
-};
 
 export function ChatClient({
   chat,
@@ -48,6 +46,9 @@ export function ChatClient({
   const [msgs, setMsgs] = useState<Message[]>(initialMessages);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<SendError | null>(null);
+  const [pendingAssistant, setPendingAssistant] = useState("");
+  const [streamActive, setStreamActive] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [shareStatus, setShareStatus] = useState<"idle" | "loading" | "copied" | "error">("idle");
   const [sharePanelOpen, setSharePanelOpen] = useState(false);
@@ -71,60 +72,114 @@ export function ChatClient({
     permission: "private" | "shared";
   } | null>(null);
   const [deletingContextId, setDeletingContextId] = useState<string | null>(null);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const toastIdRef = useRef(0);
   const isOwner = chat.ownerId === currentUser.id;
 
-  // Scroll to bottom on new messages
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [msgs.length]);
+  }, [msgs.length, pendingAssistant]);
 
-  // Stream messages. The browser handles reconnects for EventSource.
   useEffect(() => {
-    if (typeof EventSource === "undefined") {
-      return;
-    }
+    if (typeof EventSource === "undefined") return;
 
     const events = new EventSource(`/api/chats/${chat.id}/messages/stream`);
     events.addEventListener("message", (event) => {
       try {
         const msg = JSON.parse(event.data) as Message;
         setMsgs((prev) => mergeMessages(prev, [msg]));
+        if (msg.role === "assistant") {
+          setPendingAssistant("");
+          setStreamActive(false);
+        }
       } catch {}
     });
+    events.addEventListener("assistant.delta", (event) => {
+      try {
+        const data = JSON.parse(event.data) as { delta?: string };
+        if (!data.delta) return;
+        setStreamActive(true);
+        setPendingAssistant((prev) => prev + data.delta);
+      } catch {}
+    });
+    events.addEventListener("assistant.done", () => setStreamActive(false));
+    events.addEventListener("assistant.error", (event) => {
+      let message = "Claude failed to respond.";
+      try {
+        const data = JSON.parse(event.data) as { message?: string };
+        if (data.message) message = data.message;
+      } catch {}
+      setPendingAssistant("");
+      setStreamActive(false);
+      pushToast(message, "error");
+    });
 
-    return () => {
-      events.close();
-    };
+    return () => events.close();
   }, [chat.id]);
 
   useEffect(() => {
-    if (isOwner && sharePanelOpen) {
-      void loadShareLinks();
-    }
+    if (isOwner && sharePanelOpen) void loadShareLinks();
   }, [isOwner, sharePanelOpen]);
 
   useEffect(() => {
     void loadContextResources();
   }, [chat.id]);
 
+  useEffect(() => {
+    if (!sendError?.retryAfterMs) return;
+    const timer = setInterval(() => {
+      setSendError((current) => {
+        if (!current?.retryAfterMs) return current;
+        return { ...current, retryAfterMs: Math.max(0, current.retryAfterMs - 1000) };
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [sendError?.retryAfterMs]);
+
+  function pushToast(message: string, tone: Toast["tone"] = "info") {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, tone, message }]);
+    setTimeout(() => setToasts((prev) => prev.filter((toast) => toast.id !== id)), 3200);
+  }
+
   async function send(e: FormEvent) {
     e.preventDefault();
-    if (!input.trim() || sending) return;
-    const content = input.trim();
+    await sendContent(input);
+  }
+
+  async function sendContent(rawContent: string) {
+    if (!rawContent.trim() || sending) return;
+    const content = rawContent.trim();
     setSending(true);
+    setSendError(null);
     setInput("");
+    setPendingAssistant("");
+    setStreamActive(true);
     try {
       const r = await fetch(`/api/chats/${chat.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
       });
-      if (!r.ok) throw new Error("send failed");
+      const payload = await r.json().catch(() => ({}));
+      if (payload.message) setMsgs((prev) => mergeMessages(prev, [payload.message as Message]));
+      if (payload.reply) {
+        setMsgs((prev) => mergeMessages(prev, [payload.reply as Message]));
+        setPendingAssistant("");
+        setStreamActive(false);
+      }
+      if (!r.ok) throw buildSendError(r.status, payload, content);
     } catch (e) {
-      console.error(e);
-      // restore the input on failure
+      setSendError(
+        isSendError(e)
+          ? e
+          : { code: "send_failed", message: e instanceof Error ? e.message : "Message failed to send.", content },
+      );
       setInput(content);
+      setPendingAssistant("");
+      setStreamActive(false);
     } finally {
       setSending(false);
     }
@@ -139,6 +194,7 @@ export function ChatClient({
       setShareLinks(j.links ?? []);
     } catch {
       setShareLinks([]);
+      pushToast("Could not load share links.", "error");
     } finally {
       setLinksLoading(false);
     }
@@ -152,16 +208,20 @@ export function ChatClient({
       const j = await r.json();
       setShareUrl(j.url);
       setSharePanelOpen(true);
+      setActionsMenuOpen(false);
       await loadShareLinks();
       try {
         await navigator.clipboard.writeText(j.url);
         setShareStatus("copied");
+        pushToast("Share link copied.", "success");
         setTimeout(() => setShareStatus("idle"), 2500);
       } catch {
         setShareStatus("idle");
+        pushToast("Share link created.", "success");
       }
     } catch {
       setShareStatus("error");
+      pushToast("Could not create share link.", "error");
       setTimeout(() => setShareStatus("idle"), 2500);
     }
   }
@@ -172,9 +232,11 @@ export function ChatClient({
     try {
       await navigator.clipboard.writeText(url);
       setShareStatus("copied");
+      pushToast("Share link copied.", "success");
       setTimeout(() => setShareStatus("idle"), 1800);
     } catch {
       setShareStatus("idle");
+      pushToast("Could not copy link.", "error");
     }
   }
 
@@ -187,6 +249,9 @@ export function ChatClient({
       if (!r.ok) throw new Error("revoke failed");
       setShareLinks((prev) => prev.filter((link) => link.token !== token));
       if (shareUrl?.endsWith(`/c/${token}`)) setShareUrl(null);
+      pushToast("Share link revoked.", "success");
+    } catch {
+      pushToast("Could not revoke share link.", "error");
     } finally {
       setRevokingToken(null);
     }
@@ -201,6 +266,7 @@ export function ChatClient({
       setContextResources(j.resources ?? []);
     } catch {
       setContextResources([]);
+      pushToast("Could not load context.", "error");
     } finally {
       setContextLoading(false);
     }
@@ -243,6 +309,7 @@ export function ChatClient({
       resetContextForm();
       setContextFormOpen(false);
       await loadContextResources();
+      pushToast("Context attached.", "success");
     } catch (err) {
       setContextError(err instanceof Error ? err.message : "Could not add context.");
     } finally {
@@ -260,6 +327,9 @@ export function ChatClient({
     if (r.ok) {
       setEditingContext(null);
       await loadContextResources();
+      pushToast("Context updated.", "success");
+    } else {
+      pushToast("Could not update context.", "error");
     }
   }
 
@@ -267,7 +337,11 @@ export function ChatClient({
     setDeletingContextId(resourceId);
     try {
       const r = await fetch(`/api/chats/${chat.id}/context/${resourceId}`, { method: "DELETE" });
-      if (r.ok) setContextResources((prev) => prev.filter((resource) => resource.id !== resourceId));
+      if (!r.ok) throw new Error("delete failed");
+      setContextResources((prev) => prev.filter((resource) => resource.id !== resourceId));
+      pushToast("Context removed.", "success");
+    } catch {
+      pushToast("Could not remove context.", "error");
     } finally {
       setDeletingContextId(null);
     }
@@ -303,265 +377,184 @@ export function ChatClient({
     return `${window.location.origin}/c/${token}`;
   }
 
-  return (
-    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
-      <header style={{
-        display: "flex", alignItems: "center", gap: 14,
-        padding: "16px 24px",
-        borderBottom: "1px solid var(--border)",
-        background: "var(--bg-card)",
-      }}>
-        <Link href="/" style={{ color: "var(--text-secondary)", fontSize: 18, textDecoration: "none" }}>‹</Link>
-        <h1 style={{
-          fontFamily: "'DM Serif Display', serif",
-          fontSize: 20, letterSpacing: "-0.01em", flex: 1,
-        }}>
-          {chat.title}
-        </h1>
+  function openContextPanel() {
+    setContextPanelOpen((open) => !open);
+    setActionsMenuOpen(false);
+    if (!contextPanelOpen) void loadContextResources();
+  }
 
-        {/* Members */}
-        <div style={{ display: "flex", marginRight: 8 }}>
-          {members.slice(0, 4).map((m, i) => (
-            <span
-              key={m.id}
-              title={`${m.name || m.email}${m.isOwner ? " (owner)" : ""}`}
-              style={{
-                width: 28, height: 28, borderRadius: "50%",
-                background: m.isOwner ? "var(--accent)" : "#6b6b6b",
-                color: "white", fontWeight: 500, fontSize: 12,
-                display: "grid", placeItems: "center",
-                border: "2px solid var(--bg-card)",
-                marginLeft: i === 0 ? 0 : -8,
-              }}
-            >
-              {(m.name || m.email)[0].toUpperCase()}
-            </span>
-          ))}
+  const activeMembers = members.length;
+  const hiddenMobileMembers = Math.max(0, activeMembers - 1);
+
+  return (
+    <div className="chat-shell">
+      <ToastStack toasts={toasts} />
+      <header className="chat-header">
+        <Link href="/" className="icon-link tap-target" aria-label="Back to chats">
+          ‹
+        </Link>
+        <div className="chat-title-group">
+          <h1>{chat.title}</h1>
+          <span>{activeMembers} member{activeMembers === 1 ? "" : "s"}</span>
         </div>
 
-        <button
-          onClick={() => {
-            setContextPanelOpen((open) => !open);
-            if (!contextPanelOpen) void loadContextResources();
-          }}
-          style={{
-            background: contextPanelOpen ? "var(--accent-bg)" : "transparent",
-            color: contextPanelOpen ? "var(--accent)" : "var(--text-secondary)",
-            border: "1px solid var(--border)",
-            padding: "8px 12px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-            cursor: "pointer", fontFamily: "inherit",
-          }}
-        >
-          📎 {contextResources.length ? `${contextResources.length} context` : "Context"}
-        </button>
+        <div className="member-stack member-stack-desktop" aria-label={`${activeMembers} chat members`}>
+          {members.slice(0, 4).map((m, i) => (
+            <Avatar key={m.id} member={m} overlap={i > 0} />
+          ))}
+          {members.length > 4 && <span className="avatar avatar-count">+{members.length - 4}</span>}
+        </div>
+        <div className="member-stack member-stack-mobile" aria-label={`${activeMembers} chat members`}>
+          {members[0] && <Avatar member={members[0]} />}
+          {hiddenMobileMembers > 0 && <span className="avatar avatar-count">+{hiddenMobileMembers}</span>}
+        </div>
 
-        {isOwner && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button
-              onClick={() => setSharePanelOpen((open) => !open)}
-              style={{
-                background: "transparent",
-                color: "var(--text-secondary)",
-                border: "1px solid var(--border)",
-                padding: "8px 12px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-                cursor: "pointer", fontFamily: "inherit",
-              }}
-            >
-              Links
-            </button>
-            <button
-              onClick={share}
-              disabled={shareStatus === "loading"}
-              style={{
-                background: shareStatus === "copied" ? "#4a8c42" : "var(--accent)",
-                color: "white", border: 0,
-                padding: "8px 14px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-                cursor: "pointer", fontFamily: "inherit",
-              }}
-            >
-              {shareStatus === "loading" ? "Sharing..." :
-               shareStatus === "copied" ? "Copied" :
-               shareStatus === "error" ? "Failed" :
-               "Share"}
-            </button>
-          </div>
-        )}
+        <div className="chat-actions chat-actions-desktop">
+          <button
+            type="button"
+            onClick={openContextPanel}
+            className={`secondary-button tap-target ${contextPanelOpen ? "is-active" : ""}`}
+          >
+            Context {contextResources.length ? `(${contextResources.length})` : ""}
+          </button>
+          {isOwner && (
+            <>
+              <button
+                type="button"
+                onClick={() => setSharePanelOpen((open) => !open)}
+                className="secondary-button tap-target"
+              >
+                Links
+              </button>
+              <button
+                type="button"
+                onClick={share}
+                disabled={shareStatus === "loading"}
+                className="primary-button tap-target"
+              >
+                {shareStatus === "loading" ? <Spinner label="Sharing" /> : shareStatus === "copied" ? "Copied" : "Share"}
+              </button>
+            </>
+          )}
+        </div>
+
+        <div className="chat-actions-mobile">
+          <button
+            type="button"
+            className="secondary-button icon-button tap-target"
+            onClick={() => setActionsMenuOpen((open) => !open)}
+            aria-expanded={actionsMenuOpen}
+            aria-label="More actions"
+          >
+            ⋯
+          </button>
+          {actionsMenuOpen && (
+            <div className="mobile-action-menu">
+              <button type="button" onClick={openContextPanel} className="menu-button">
+                Context {contextResources.length ? `(${contextResources.length})` : ""}
+              </button>
+              {isOwner && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSharePanelOpen((open) => !open);
+                      setActionsMenuOpen(false);
+                    }}
+                    className="menu-button"
+                  >
+                    Links
+                  </button>
+                  <button type="button" onClick={share} disabled={shareStatus === "loading"} className="menu-button">
+                    {shareStatus === "loading" ? "Sharing..." : "Share"}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </header>
 
       {shareUrl && (
-        <div style={{
-          padding: "12px 24px",
-          background: "var(--accent-bg)",
-          borderBottom: "1px solid var(--border)",
-          fontSize: 13,
-          color: "var(--accent)",
-        }}>
-          <strong>Share link:</strong>{" "}
-          <code style={{ background: "white", padding: "2px 8px", borderRadius: 4 }}>{shareUrl}</code>{" "}
-          — anyone with this link can join and chat
+        <div className="share-banner">
+          <strong>Share link:</strong> <code>{shareUrl}</code> <span>Anyone with this link can join and chat.</span>
         </div>
       )}
 
       {isOwner && sharePanelOpen && (
-        <div style={{
-          padding: "14px 24px 16px",
-          background: "rgba(255, 255, 255, 0.74)",
-          borderBottom: "1px solid var(--border)",
-        }}>
-          <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 10 }}>
-              <strong style={{ fontSize: 13 }}>Manage share links</strong>
-              <span style={{ color: "var(--text-tertiary)", fontSize: 12 }}>
-                {linksLoading ? "Loading..." : `${shareLinks.length} active`}
-              </span>
+        <section className="chat-panel">
+          <div className="panel-inner">
+            <div className="panel-heading">
+              <strong>Manage share links</strong>
+              <span>{linksLoading ? "Loading..." : `${shareLinks.length} active`}</span>
             </div>
-            {shareLinks.length === 0 && !linksLoading ? (
-              <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                No active links. Create one with Share.
-              </div>
+            {linksLoading ? (
+              <SkeletonList />
+            ) : shareLinks.length === 0 ? (
+              <div className="empty-panel">No active links. Create one with Share.</div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="stack-list">
                 {shareLinks.map((link) => (
-                  <div
-                    key={link.token}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "minmax(0, 1fr) auto auto",
-                      gap: 10,
-                      alignItems: "center",
-                      background: "var(--bg-card)",
-                      border: "1px solid var(--border)",
-                      borderRadius: 8,
-                      padding: "9px 10px",
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {link.token}
-                      </code>
-                      <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
-                        Created {new Date(link.createdAt).toLocaleString()}
-                      </span>
+                  <div key={link.token} className="share-row">
+                    <div className="truncate">
+                      <code>{link.token}</code>
+                      <span>Created {new Date(link.createdAt).toLocaleString()}</span>
                     </div>
-                    <button
-                      onClick={() => copyLink(link.token)}
-                      style={{
-                        border: "1px solid var(--border)",
-                        background: "transparent",
-                        color: "var(--text-secondary)",
-                        padding: "6px 10px",
-                        borderRadius: 7,
-                        cursor: "pointer",
-                        font: "inherit",
-                        fontSize: 12,
-                      }}
-                    >
+                    <button type="button" onClick={() => copyLink(link.token)} className="secondary-button tap-target">
                       Copy
                     </button>
                     <button
+                      type="button"
                       onClick={() => revoke(link.token)}
                       disabled={revokingToken === link.token}
-                      style={{
-                        border: "1px solid rgba(150, 40, 40, 0.22)",
-                        background: "rgba(150, 40, 40, 0.06)",
-                        color: "#963030",
-                        padding: "6px 10px",
-                        borderRadius: 7,
-                        cursor: revokingToken === link.token ? "wait" : "pointer",
-                        font: "inherit",
-                        fontSize: 12,
-                      }}
+                      className="danger-button tap-target"
                     >
-                      {revokingToken === link.token ? "Revoking..." : "Revoke"}
+                      {revokingToken === link.token ? <Spinner label="Revoking" /> : "Revoke"}
                     </button>
                   </div>
                 ))}
               </div>
             )}
           </div>
-        </div>
+        </section>
       )}
 
       {contextPanelOpen && (
-        <div style={{
-          padding: "14px 24px 16px",
-          background: "rgba(251, 250, 247, 0.92)",
-          borderBottom: "1px solid var(--border)",
-        }}>
-          <div style={{ maxWidth: 820, margin: "0 auto" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-              <strong style={{ fontSize: 13, flex: 1 }}>Mounted context</strong>
-              <span style={{ color: "var(--text-tertiary)", fontSize: 12 }}>
-                {contextLoading ? "Loading..." : `${contextResources.length} visible`}
-              </span>
+        <section className="chat-panel context-panel">
+          <div className="panel-inner">
+            <div className="panel-heading">
+              <strong>Mounted context</strong>
+              <span>{contextLoading ? "Loading..." : `${contextResources.length} visible`}</span>
               <button
+                type="button"
                 onClick={() => setContextFormOpen((open) => !open)}
-                style={{
-                  background: "var(--accent)",
-                  color: "white",
-                  border: 0,
-                  padding: "7px 11px",
-                  borderRadius: 8,
-                  cursor: "pointer",
-                  font: "inherit",
-                  fontSize: 12,
-                  fontWeight: 500,
-                }}
+                className="primary-button tap-target"
               >
-                + Add context
+                Add context
               </button>
             </div>
 
             {contextFormOpen && (
-              <form onSubmit={addContext} style={{
-                border: "1px solid var(--border)",
-                background: "var(--bg-card)",
-                borderRadius: 8,
-                padding: 12,
-                marginBottom: 12,
-              }}>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, marginBottom: 10 }}>
+              <form onSubmit={addContext} className="context-form">
+                <div className="context-form-grid">
                   <input
                     value={contextName}
                     onChange={(e) => setContextName(e.target.value)}
                     placeholder="Context name"
-                    style={{
-                      border: "1px solid var(--border)",
-                      borderRadius: 7,
-                      padding: "8px 10px",
-                      font: "inherit",
-                      fontSize: 13,
-                    }}
+                    className="field"
                   />
                   <select
                     value={contextPermission}
                     onChange={(e) => setContextPermission(e.target.value as "private" | "shared")}
-                    style={{
-                      border: "1px solid var(--border)",
-                      borderRadius: 7,
-                      padding: "8px 10px",
-                      font: "inherit",
-                      fontSize: 13,
-                      background: "white",
-                    }}
+                    className="field"
                   >
                     <option value="shared">Shared</option>
                     <option value="private">Private</option>
                   </select>
-                  <label style={{
-                    border: "1px solid var(--border)",
-                    borderRadius: 7,
-                    padding: "8px 10px",
-                    font: "inherit",
-                    fontSize: 13,
-                    color: "var(--text-secondary)",
-                    cursor: "pointer",
-                    whiteSpace: "nowrap",
-                  }}>
+                  <label className="file-button tap-target">
                     File
                     <input
                       type="file"
-                      style={{ display: "none" }}
                       onChange={(e) => {
                         const file = e.currentTarget.files?.[0];
                         if (file) void readContextFile(file);
@@ -587,126 +580,65 @@ export function ChatClient({
                     }}
                     placeholder="Paste context text, or drop a small text file here."
                     rows={6}
-                    style={{
-                      width: "100%",
-                      border: "1px solid var(--border)",
-                      borderRadius: 8,
-                      padding: 10,
-                      resize: "vertical",
-                      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                      fontSize: 12.5,
-                      lineHeight: 1.45,
-                    }}
+                    className="field mono-field"
                   />
                 </div>
 
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
-                  <span style={{ color: utf8Bytes(contextContent) > MAX_CONTEXT_BYTES ? "#963030" : "var(--text-tertiary)", fontSize: 12, flex: 1 }}>
+                <div className="form-footer">
+                  <span className={utf8Bytes(contextContent) > MAX_CONTEXT_BYTES ? "danger-text" : ""}>
                     {contextKind === "file" ? "file" : "text"} · {formatBytes(utf8Bytes(contextContent))} / 100KB
                   </span>
-                  {contextError && <span style={{ color: "#963030", fontSize: 12 }}>{contextError}</span>}
+                  {contextError && <span className="danger-text">{contextError}</span>}
                   <button
                     type="button"
                     onClick={() => {
                       resetContextForm();
                       setContextFormOpen(false);
                     }}
-                    style={{
-                      border: "1px solid var(--border)",
-                      background: "transparent",
-                      color: "var(--text-secondary)",
-                      padding: "7px 10px",
-                      borderRadius: 7,
-                      cursor: "pointer",
-                      font: "inherit",
-                      fontSize: 12,
-                    }}
+                    className="secondary-button tap-target"
                   >
                     Cancel
                   </button>
-                  <button
-                    type="submit"
-                    disabled={contextSaving}
-                    style={{
-                      border: 0,
-                      background: "var(--accent)",
-                      color: "white",
-                      padding: "7px 11px",
-                      borderRadius: 7,
-                      cursor: contextSaving ? "wait" : "pointer",
-                      font: "inherit",
-                      fontSize: 12,
-                      fontWeight: 500,
-                    }}
-                  >
-                    {contextSaving ? "Adding..." : "Add"}
+                  <button type="submit" disabled={contextSaving} className="primary-button tap-target">
+                    {contextSaving ? <Spinner label="Adding" /> : "Add"}
                   </button>
                 </div>
               </form>
             )}
 
-            {contextResources.length === 0 && !contextLoading ? (
-              <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                No context attached yet.
+            {contextLoading ? (
+              <SkeletonList />
+            ) : contextResources.length === 0 ? (
+              <div className="empty-panel">
+                No context attached. Paste text or drop a small file to give Claude something to reference.
               </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="stack-list">
                 {contextResources.map((resource) => {
                   const canManage = isOwner || resource.addedById === currentUser.id;
                   const editing = editingContext?.id === resource.id;
                   return (
-                    <div
-                      key={resource.id}
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "32px minmax(0, 1fr) auto",
-                        gap: 10,
-                        alignItems: "center",
-                        background: "var(--bg-card)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 8,
-                        padding: "9px 10px",
-                      }}
-                    >
-                      <span style={{
-                        width: 28,
-                        height: 28,
-                        borderRadius: 7,
-                        display: "grid",
-                        placeItems: "center",
-                        background: resource.kind === "file" ? "rgba(74, 91, 140, 0.10)" : "var(--accent-bg)",
-                        color: resource.kind === "file" ? "#4a5b8c" : "var(--accent)",
-                        fontSize: 12,
-                        fontWeight: 700,
-                      }}>
+                    <div key={resource.id} className="context-row">
+                      <span className={`resource-icon ${resource.kind === "file" ? "file" : ""}`}>
                         {resource.kind === "file" ? "F" : "T"}
                       </span>
-                      <div style={{ minWidth: 0 }}>
+                      <div className="truncate">
                         {editing ? (
-                          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 8 }}>
+                          <div className="edit-grid">
                             <input
                               value={editingContext.name}
                               onChange={(e) => setEditingContext({ ...editingContext, name: e.target.value })}
-                              style={{
-                                minWidth: 0,
-                                border: "1px solid var(--border)",
-                                borderRadius: 7,
-                                padding: "6px 8px",
-                                font: "inherit",
-                                fontSize: 13,
-                              }}
+                              className="field"
                             />
                             <select
                               value={editingContext.permission}
-                              onChange={(e) => setEditingContext({ ...editingContext, permission: e.target.value as "private" | "shared" })}
-                              style={{
-                                border: "1px solid var(--border)",
-                                borderRadius: 7,
-                                padding: "6px 8px",
-                                font: "inherit",
-                                fontSize: 13,
-                                background: "white",
-                              }}
+                              onChange={(e) =>
+                                setEditingContext({
+                                  ...editingContext,
+                                  permission: e.target.value as "private" | "shared",
+                                })
+                              }
+                              className="field"
                             >
                               <option value="shared">Shared</option>
                               <option value="private">Private</option>
@@ -714,65 +646,50 @@ export function ChatClient({
                           </div>
                         ) : (
                           <>
-                            <div style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
-                              <strong style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                {resource.name}
-                              </strong>
-                              <span style={{
-                                fontSize: 10,
-                                padding: "1px 6px",
-                                borderRadius: 4,
-                                color: resource.permission === "shared" ? "var(--accent)" : "#8a6a24",
-                                background: resource.permission === "shared" ? "var(--accent-bg)" : "rgba(138, 106, 36, 0.10)",
-                                textTransform: "uppercase",
-                                letterSpacing: "0.04em",
-                              }}>
-                                {resource.permission}
-                              </span>
+                            <div className="resource-title">
+                              <strong>{resource.name}</strong>
+                              <span className={`permission-pill ${resource.permission}`}>{resource.permission}</span>
                             </div>
-                            <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
-                              {formatBytes(resource.sizeBytes)} · added by {resource.addedByName || resource.addedByEmail || "unknown"}
+                            <span>
+                              {formatBytes(resource.sizeBytes)} · added by{" "}
+                              {resource.addedByName || resource.addedByEmail || "unknown"}
                             </span>
                           </>
                         )}
                       </div>
                       {canManage && (
-                        <div style={{ display: "flex", gap: 7 }}>
+                        <div className="row-actions">
                           {editing ? (
                             <>
-                              <button
-                                onClick={() => updateContext(resource.id)}
-                                style={smallButtonStyle}
-                              >
+                              <button type="button" onClick={() => updateContext(resource.id)} className="secondary-button tap-target">
                                 Save
                               </button>
-                              <button
-                                onClick={() => setEditingContext(null)}
-                                style={smallButtonStyle}
-                              >
+                              <button type="button" onClick={() => setEditingContext(null)} className="secondary-button tap-target">
                                 Cancel
                               </button>
                             </>
                           ) : (
                             <>
                               <button
-                                onClick={() => setEditingContext({ id: resource.id, name: resource.name, permission: resource.permission })}
-                                style={smallButtonStyle}
+                                type="button"
+                                onClick={() =>
+                                  setEditingContext({
+                                    id: resource.id,
+                                    name: resource.name,
+                                    permission: resource.permission,
+                                  })
+                                }
+                                className="secondary-button tap-target"
                               >
                                 Edit
                               </button>
                               <button
+                                type="button"
                                 onClick={() => deleteContext(resource.id)}
                                 disabled={deletingContextId === resource.id}
-                                style={{
-                                  ...smallButtonStyle,
-                                  border: "1px solid rgba(150, 40, 40, 0.22)",
-                                  background: "rgba(150, 40, 40, 0.06)",
-                                  color: "#963030",
-                                  cursor: deletingContextId === resource.id ? "wait" : "pointer",
-                                }}
+                                className="danger-button tap-target"
                               >
-                                {deletingContextId === resource.id ? "Deleting..." : "Delete"}
+                                {deletingContextId === resource.id ? <Spinner label="Deleting" /> : "Delete"}
                               </button>
                             </>
                           )}
@@ -784,105 +701,200 @@ export function ChatClient({
               </div>
             )}
           </div>
-        </div>
+        </section>
       )}
 
-      <div style={{
-        flex: 1, overflowY: "auto",
-        padding: "24px 24px 12px",
-        maxWidth: 820, width: "100%", margin: "0 auto",
-      }}>
-        {msgs.length === 0 ? (
-          <div style={{ textAlign: "center", color: "var(--text-tertiary)", padding: "40px 0", fontSize: 14 }}>
-            Say something to start the conversation.
-          </div>
+      <main className="message-list">
+        {msgs.length === 0 && !pendingAssistant ? (
+          <div className="empty-chat">Start the conversation. Try &apos;@Claude help me...&apos;</div>
         ) : (
-          msgs.map((m) => {
-            const isAssistant = m.role === "assistant";
-            const authorMember = isAssistant ? null : members.find((mem) => mem.id === m.authorId);
-            const authorName = isAssistant
-              ? "Claude"
-              : authorMember?.name || authorMember?.email || (m.authorId === currentUser.id ? (currentUser.name || currentUser.email) : "Someone");
-            const isCurrent = m.authorId === currentUser.id;
-            return (
-              <div key={m.id} style={{ display: "flex", gap: 12, padding: "10px 0", borderTop: "1px solid var(--border)" }}>
-                <span style={{
-                  width: 32, height: 32, borderRadius: "50%",
-                  background: isAssistant ? "var(--accent)" : isCurrent ? "var(--accent)" : "#6b6b6b",
-                  color: "white", fontWeight: 500, fontSize: 13,
-                  display: "grid", placeItems: "center", flexShrink: 0,
-                }}>
-                  {isAssistant ? "🦊" : authorName[0].toUpperCase()}
-                </span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 4, display: "flex", gap: 8, alignItems: "center" }}>
-                    <strong style={{ color: isAssistant ? "var(--accent)" : "var(--text-primary)" }}>{authorName}</strong>
-                    {isCurrent && (
-                      <span style={{ fontSize: 9, padding: "1px 5px", background: "var(--accent-bg)", color: "var(--accent)", borderRadius: 3, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-                        you
-                      </span>
-                    )}
-                    <span style={{ color: "var(--text-tertiary)", fontSize: 11 }}>
-                      {new Date(m.createdAt).toLocaleTimeString()}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 14.5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{m.content}</div>
-                </div>
-              </div>
-            );
-          })
+          <>
+            {msgs.map((m) => (
+              <MessageRow
+                key={m.id}
+                message={m}
+                members={members}
+                currentUser={currentUser}
+              />
+            ))}
+            {pendingAssistant && <PendingAssistant content={pendingAssistant} active={streamActive} />}
+            {!pendingAssistant && streamActive && <PendingAssistant content="" active />}
+          </>
         )}
         <div ref={bottomRef} />
-      </div>
+      </main>
 
-      <form onSubmit={send} style={{
-        padding: "12px 24px 24px",
-        borderTop: "1px solid var(--border)",
-        background: "var(--bg-secondary)",
-      }}>
-        <div style={{
-          background: "var(--bg-card)",
-          border: "1px solid var(--border)",
-          borderRadius: 12,
-          padding: "10px 12px",
-          maxWidth: 820, margin: "0 auto",
-          display: "flex", gap: 10, alignItems: "flex-end",
-        }}>
+      <form onSubmit={send} className="composer-shell">
+        {sendError && (
+          <div className="send-error">
+            <span>{formatSendError(sendError)}</span>
+            <button
+              type="button"
+              onClick={() => void sendContent(sendError.content)}
+              disabled={sending || (sendError.retryAfterMs ?? 0) > 0}
+              className="secondary-button tap-target"
+            >
+              Retry{sendError.retryAfterMs ? ` in ${Math.ceil(sendError.retryAfterMs / 1000)}s` : ""}
+            </button>
+          </div>
+        )}
+        <div className="composer-box">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                send(e as unknown as FormEvent);
+                void sendContent(input);
               }
             }}
-            placeholder="Message Claude… (Enter to send, Shift+Enter for newline)"
+            placeholder="Message Claude..."
             rows={2}
-            style={{
-              flex: 1, border: 0, outline: 0, resize: "none",
-              fontFamily: "inherit", fontSize: 14.5, lineHeight: 1.5,
-              background: "transparent", color: "var(--text-primary)",
-            }}
             disabled={sending}
           />
-          <button
-            type="submit"
-            disabled={sending || !input.trim()}
-            style={{
-              background: "var(--accent)", color: "white", border: 0,
-              padding: "8px 16px", borderRadius: 8, fontSize: 13, fontWeight: 500,
-              cursor: sending ? "wait" : "pointer", fontFamily: "inherit",
-              opacity: !input.trim() ? 0.5 : 1,
-              alignSelf: "flex-end",
-            }}
-          >
-            {sending ? "…" : "Send"}
+          <button type="submit" disabled={sending || !input.trim()} className="primary-button tap-target">
+            {sending ? <Spinner label="Sending" /> : "Send"}
           </button>
         </div>
       </form>
     </div>
   );
+}
+
+function MessageRow({
+  message,
+  members,
+  currentUser,
+}: {
+  message: Message;
+  members: Member[];
+  currentUser: CurrentUser;
+}) {
+  const isAssistant = message.role === "assistant";
+  const authorMember = isAssistant ? null : members.find((mem) => mem.id === message.authorId);
+  const authorName = isAssistant
+    ? "Claude"
+    : authorMember?.name ||
+      authorMember?.email ||
+      (message.authorId === currentUser.id ? currentUser.name || currentUser.email : "Someone");
+  const isCurrent = message.authorId === currentUser.id;
+
+  return (
+    <div className="message-row">
+      <span className={`message-avatar ${isAssistant || isCurrent ? "accent" : ""}`}>{isAssistant ? "C" : authorName[0].toUpperCase()}</span>
+      <div className="message-body">
+        <div className="message-meta">
+          <strong>{authorName}</strong>
+          {isCurrent && <span className="you-pill">you</span>}
+          <span>{new Date(message.createdAt).toLocaleTimeString()}</span>
+        </div>
+        <div className="message-content">{message.content}</div>
+      </div>
+    </div>
+  );
+}
+
+function PendingAssistant({ content, active }: { content: string; active: boolean }) {
+  return (
+    <div className="message-row pending-row">
+      <span className={`message-avatar accent ${active ? "pulse" : ""}`}>C</span>
+      <div className="message-body">
+        <div className="message-meta">
+          <strong>Claude</strong>
+          <span>typing</span>
+        </div>
+        <div className="message-content">
+          {content || <span className="typing-dots">Thinking</span>}
+          <span className="stream-cursor" aria-hidden="true" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Avatar({ member, overlap = false }: { member: Member; overlap?: boolean }) {
+  return (
+    <span
+      className={`avatar ${member.isOwner ? "owner" : ""} ${overlap ? "overlap" : ""}`}
+      title={`${member.name || member.email}${member.isOwner ? " (owner)" : ""}`}
+    >
+      {(member.name || member.email)[0].toUpperCase()}
+    </span>
+  );
+}
+
+function ToastStack({ toasts }: { toasts: Toast[] }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-stack" aria-live="polite">
+      {toasts.map((toast) => (
+        <div key={toast.id} className={`toast ${toast.tone}`}>
+          {toast.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Spinner({ label }: { label: string }) {
+  return (
+    <span className="spinner-label">
+      <span className="spinner" aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+function SkeletonList() {
+  return (
+    <div className="stack-list">
+      <div className="skeleton-row" />
+      <div className="skeleton-row short" />
+    </div>
+  );
+}
+
+function buildSendError(status: number, payload: Record<string, unknown>, content: string): SendError {
+  const code = typeof payload.error === "string" ? payload.error : "send_failed";
+  if (code === "rate_limited") {
+    return {
+      code: "rate_limited",
+      message: "Slow down.",
+      retryAfterMs: typeof payload.retryAfterMs === "number" ? payload.retryAfterMs : 30_000,
+      content,
+    };
+  }
+  if (code === "daily_budget_exceeded") {
+    return {
+      code: "daily_budget_exceeded",
+      message: "Daily limit reached.",
+      resetAt: typeof payload.resetAt === "string" ? payload.resetAt : undefined,
+      content,
+    };
+  }
+  if (code === "assistant_failed" || status >= 500) {
+    const nested = payload.error && typeof payload.error === "object" ? (payload.error as Record<string, unknown>) : null;
+    return {
+      code: "assistant_failed",
+      message: typeof nested?.message === "string" ? nested.message : "Claude failed to respond.",
+      content,
+    };
+  }
+  return { code: "send_failed", message: "Message failed to send.", content };
+}
+
+function isSendError(value: unknown): value is SendError {
+  return Boolean(value && typeof value === "object" && "code" in value && "message" in value && "content" in value);
+}
+
+function formatSendError(error: SendError) {
+  if (error.code === "rate_limited") {
+    return `Slow down — try again in ${Math.ceil((error.retryAfterMs ?? 0) / 1000)} seconds.`;
+  }
+  if (error.code === "daily_budget_exceeded") {
+    return `Daily limit reached. Resets at ${error.resetAt ? new Date(error.resetAt).toLocaleTimeString() : "the next reset"}.`;
+  }
+  return error.message;
 }
 
 function mergeMessages(current: Message[], incoming: Message[]) {
