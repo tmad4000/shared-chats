@@ -15,6 +15,7 @@ import { createShareLink, type ShareMode } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
 import { buildSystemPromptWithContext, listVisibleContextResources } from "@/lib/context";
 import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
+import { checkBudget } from "@/lib/budget";
 
 export const dynamic = "force-dynamic";
 
@@ -59,11 +60,33 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return Response.json({ error: "content required" }, { status: 400 });
   }
 
-  const userMsg = await withUserDb(user.id, async (tx) => {
-    if (!(await userCanAccessChat(user.id, chatId, tx))) {
-      return null;
-    }
+  const auditMeta = getAuditRequestMeta(req);
+  const canAccess = await withUserDb(user.id, (tx) => userCanAccessChat(user.id, chatId, tx));
+  if (!canAccess) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
 
+  const budget = await checkBudget(user.id);
+  if (!budget.ok) {
+    await logEvent({
+      userId: user.id,
+      chatId,
+      eventType: "budget.exceeded",
+      meta: { used: budget.used, cap: budget.cap, resetAt: budget.resetAt.toISOString(), surface: "rest" },
+      ...auditMeta,
+    });
+    return Response.json(
+      {
+        error: "daily_budget_exceeded",
+        used: budget.used,
+        cap: budget.cap,
+        resetAt: budget.resetAt.toISOString(),
+      },
+      { status: 429 },
+    );
+  }
+
+  const userMsg = await withUserDb(user.id, async (tx) => {
     const [inserted] = await tx
       .insert(messages)
       .values({
@@ -82,7 +105,6 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
 
-  const auditMeta = getAuditRequestMeta(req);
   await logEvent({
     userId: user.id,
     chatId,
@@ -142,7 +164,7 @@ async function generateReplyWithTools(
   const messages = [...conversation];
 
   for (let i = 0; i < 3; i++) {
-    const resp = await createClaudeMessage(messages, { systemPrompt });
+    const resp = await createClaudeMessage(messages, { systemPrompt, billedUserId: userId, chatId });
     const toolUses = resp.content.filter((block): block is ClaudeToolUseBlock => block.type === "tool_use");
 
     if (toolUses.length === 0) {

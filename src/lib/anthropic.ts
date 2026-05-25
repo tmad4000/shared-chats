@@ -1,4 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { withUserDb } from "@/db/client";
+import { usageEvents } from "@/db/schema";
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 if (!apiKey) {
@@ -8,7 +10,7 @@ if (!apiKey) {
 
 export const anthropic = new Anthropic({ apiKey });
 
-const MODEL = "claude-sonnet-4-5";
+export const CLAUDE_MODEL = "claude-sonnet-4-5";
 export const SYSTEM_PROMPT =
   "You are Claude in a shared-chat workspace where multiple humans can prompt you. Be concise, helpful, and aware that other people may see your responses. When referenced files or context aren't available yet (this is an MVP), be transparent about that. If the user asks to share the current chat, use the share_chat tool and include the returned URL in your reply.";
 
@@ -60,14 +62,14 @@ export async function generateReply(
 
 export async function createClaudeMessage(
   messages: ClaudeMessageParam[],
-  options?: { systemPrompt?: string },
+  options?: { systemPrompt?: string; billedUserId?: string; chatId?: string },
 ): Promise<ClaudeMessage> {
   if (!apiKey) {
     return {
       id: "demo",
       type: "message",
       role: "assistant",
-      model: MODEL,
+      model: CLAUDE_MODEL,
       content: [
         {
           type: "text",
@@ -86,14 +88,25 @@ export async function createClaudeMessage(
     } as ClaudeMessage;
   }
 
-  return anthropic.messages.create({
-    model: MODEL,
+  const resp = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
     max_tokens: 2048,
     system: options?.systemPrompt ?? SYSTEM_PROMPT,
     messages,
     tools: [SHARE_CHAT_TOOL],
     tool_choice: { type: "auto" },
   });
+
+  if (options?.billedUserId && options.chatId) {
+    await logUsageEvent({
+      userId: options.billedUserId,
+      chatId: options.chatId,
+      inputTokens: resp.usage.input_tokens ?? 0,
+      outputTokens: resp.usage.output_tokens ?? 0,
+    });
+  }
+
+  return resp;
 }
 
 export function extractText(resp: ClaudeMessage): string {
@@ -101,4 +114,21 @@ export function extractText(resp: ClaudeMessage): string {
     .filter((b): b is Anthropic.TextBlock => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+}
+
+async function logUsageEvent(input: {
+  userId: string;
+  chatId: string;
+  inputTokens: number;
+  outputTokens: number;
+}) {
+  await withUserDb(input.userId, async (tx) => {
+    await tx.insert(usageEvents).values({
+      userId: input.userId,
+      chatId: input.chatId,
+      model: CLAUDE_MODEL,
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+    });
+  });
 }

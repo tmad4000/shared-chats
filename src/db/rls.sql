@@ -314,3 +314,20 @@ begin
   return v_id;
 end;
 $$ language plpgsql security definer set search_path = public;
+
+-- ============================================================
+-- usage_events
+-- ============================================================
+alter table public.usage_events enable row level security;
+alter table public.usage_events force row level security;
+
+drop policy if exists usage_events_select_owner on public.usage_events;
+create policy usage_events_select_owner on public.usage_events
+  for select using (user_id = public.current_app_user_id());
+
+drop policy if exists usage_events_insert_owner on public.usage_events;
+create policy usage_events_insert_owner on public.usage_events
+  for insert with check (user_id = public.current_app_user_id());
+
+drop policy if exists usage_events_no_update on public.usage_events;
+drop policy if exists usage_events_no_delete on public.usage_events;

@@ -12,6 +12,7 @@ import { createShareLink } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
 import { listVisibleContextResources, normalizeContextInput } from "@/lib/context";
 import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
+import { checkBudget } from "@/lib/budget";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -227,6 +228,36 @@ function createServer(userId: string, baseUrl: string, auditMeta: AuditRequestMe
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ chatId, content }) => {
+      const accessible = await withUserDb(userId, (tx) => userCanAccessChat(userId, chatId, tx));
+      if (!accessible) {
+        return { content: [{ type: "text", text: "Chat not found or not visible." }], isError: true };
+      }
+
+      const budget = await checkBudget(userId);
+      if (!budget.ok) {
+        await logEvent({
+          userId,
+          chatId,
+          eventType: "budget.exceeded",
+          meta: { used: budget.used, cap: budget.cap, resetAt: budget.resetAt.toISOString(), surface: "mcp" },
+          ...auditMeta,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error: "daily_budget_exceeded",
+                used: budget.used,
+                cap: budget.cap,
+                resetAt: budget.resetAt.toISOString(),
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
       const created = await appendUserMessage(userId, chatId, content);
       if (!created) {
         return { content: [{ type: "text", text: "Chat not found or not visible." }], isError: true };

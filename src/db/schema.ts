@@ -100,6 +100,18 @@ export const auditEvents = pgTable("audit_events", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+// ============ usage_events ============
+// Token usage ledger for per-user budget checks.
+export const usageEvents = pgTable("usage_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  chatId: uuid("chat_id").notNull(),
+  model: text("model").notNull(),
+  inputTokens: integer("input_tokens").notNull(),
+  outputTokens: integer("output_tokens").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type Chat = typeof chats.$inferSelect;
 export type Message = typeof messages.$inferSelect;
@@ -108,3 +120,4 @@ export type ChatMember = typeof chatMembers.$inferSelect;
 export type ContextResource = typeof contextResources.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type AuditEvent = typeof auditEvents.$inferSelect;
+export type UsageEvent = typeof usageEvents.$inferSelect;
