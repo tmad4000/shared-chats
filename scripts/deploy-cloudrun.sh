@@ -1,18 +1,12 @@
 #!/bin/bash
-# Deploy shared-chats to Cloud Run.
-# Mirrors collablists deploy pattern.
-#
-# Prereqs:
-#   - gcloud authenticated (jacob@ideaflow.io)
-#   - Project: boreal-conquest-464203-v2
-#
-# Usage: bash scripts/deploy-cloudrun.sh
+# Deploy shared-chats to Cloud Run with Cloud SQL connection + Secret Manager secrets.
 
 set -euo pipefail
 
 PROJECT="boreal-conquest-464203-v2"
 REGION="us-central1"
 SERVICE="shared-chats"
+INSTANCE="shared-chats-pg"
 AR_REPO="shared-chats"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${AR_REPO}/${SERVICE}"
 
@@ -21,21 +15,17 @@ gcloud services enable \
   run.googleapis.com \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
+  secretmanager.googleapis.com \
+  sqladmin.googleapis.com \
   --project="$PROJECT" 2>&1 | tail -3
 
-echo "==> Creating Artifact Registry repo (idempotent)..."
-gcloud artifacts repositories create "$AR_REPO" \
-  --repository-format=docker \
-  --location="$REGION" \
-  --project="$PROJECT" 2>&1 | tail -3 || true
-
-echo "==> Building image with Cloud Build..."
+echo "==> Building image..."
 gcloud builds submit \
   --project="$PROJECT" \
   --tag "$IMAGE" \
-  . 2>&1 | tail -10
+  . 2>&1 | tail -8
 
-echo "==> Deploying to Cloud Run..."
+echo "==> Deploying to Cloud Run with Cloud SQL + Secrets..."
 gcloud run deploy "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \
@@ -46,9 +36,13 @@ gcloud run deploy "$SERVICE" \
   --memory=512Mi \
   --cpu=1 \
   --min-instances=0 \
-  --max-instances=10 2>&1 | tail -10
+  --max-instances=10 \
+  --add-cloudsql-instances="${PROJECT}:${REGION}:${INSTANCE}" \
+  --set-secrets="DATABASE_URL=database-url-shared-chats:latest,AUTH_SECRET=auth-secret-shared-chats:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest" \
+  --set-env-vars="NODE_ENV=production" \
+  2>&1 | tail -10
 
-echo "==> Deploy complete. URL:"
+echo "==> Service URL:"
 gcloud run services describe "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \
