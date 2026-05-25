@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
-import crypto from "node:crypto";
 import { getCurrentUser } from "@/lib/auth";
 import { userCanAdminChat } from "@/lib/access";
 import { withUserDb } from "@/db/client";
 import { shareLinks } from "@/db/schema";
 import { and, asc, eq, isNull } from "drizzle-orm";
+import { createShareLink } from "@/lib/share";
+import { getRequestOrigin } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -49,51 +50,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const body = await req.json().catch(() => ({} as Record<string, unknown>));
   const reuse = body?.reuse !== false; // default true
 
-  return withUserDb(user.id, async (tx) => {
-    if (!(await userCanAdminChat(user.id, chatId, tx))) {
-      return Response.json({ error: "only the owner can share" }, { status: 403 });
-    }
-
-    if (reuse) {
-      const existing = (
-        await tx
-          .select()
-          .from(shareLinks)
-          .where(and(eq(shareLinks.chatId, chatId), isNull(shareLinks.revokedAt)))
-          .limit(1)
-      )[0];
-      if (existing) {
-        return Response.json({
-          token: existing.token,
-          url: buildShareUrl(req, existing.token),
-          createdAt: existing.createdAt,
-          reused: true,
-        });
-      }
-    }
-
-    const token = generateToken();
-    const [created] = await tx
-      .insert(shareLinks)
-      .values({ token, chatId, createdById: user.id })
-      .returning();
-
-    return Response.json({
-      token: created.token,
-      url: buildShareUrl(req, created.token),
-      createdAt: created.createdAt,
-      reused: false,
-    });
+  const result = await createShareLink(chatId, user.id, {
+    baseUrl: getRequestOrigin(req),
+    reuse,
   });
-}
-
-function generateToken(): string {
-  return crypto.randomBytes(16).toString("base64url");
-}
-
-function buildShareUrl(req: NextRequest, token: string): string {
-  // Prefer X-Forwarded-Host for Cloud Run (sets the right origin).
-  const proto = req.headers.get("x-forwarded-proto") ?? "https";
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? "localhost";
-  return `${proto}://${host}/c/${token}`;
+  if (!result) {
+    return Response.json({ error: "only the owner can share" }, { status: 403 });
+  }
+  return Response.json(result);
 }

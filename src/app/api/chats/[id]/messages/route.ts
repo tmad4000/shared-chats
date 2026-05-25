@@ -4,7 +4,14 @@ import { userCanAccessChat } from "@/lib/access";
 import { withUserDb } from "@/db/client";
 import { chats, messages } from "@/db/schema";
 import { and, asc, eq, gt } from "drizzle-orm";
-import { generateReply } from "@/lib/anthropic";
+import {
+  createClaudeMessage,
+  extractText,
+  type ClaudeMessageParam,
+  type ClaudeToolUseBlock,
+} from "@/lib/anthropic";
+import { createShareLink, type ShareMode } from "@/lib/share";
+import { getRequestOrigin } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -82,12 +89,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         .orderBy(asc(messages.createdAt)),
     );
 
-    const turns = history.map((m) => ({
+    const turns: ClaudeMessageParam[] = history.map((m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
     }));
 
-    const reply = await generateReply(turns);
+    const reply = await generateReplyWithTools(turns, chatId, user.id, getRequestOrigin(req));
     assistantMsg = await withUserDb(user.id, async (tx) => {
       const [inserted] = await tx
         .insert(messages)
@@ -107,4 +114,80 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   }
 
   return Response.json({ message: userMsg, reply: assistantMsg });
+}
+
+async function generateReplyWithTools(
+  conversation: ClaudeMessageParam[],
+  chatId: string,
+  userId: string,
+  baseUrl: string,
+): Promise<string> {
+  const messages = [...conversation];
+
+  for (let i = 0; i < 3; i++) {
+    const resp = await createClaudeMessage(messages);
+    const toolUses = resp.content.filter((block): block is ClaudeToolUseBlock => block.type === "tool_use");
+
+    if (toolUses.length === 0) {
+      return extractText(resp) || "(No reply)";
+    }
+
+    messages.push({
+      role: "assistant",
+      content: resp.content as ClaudeMessageParam["content"],
+    });
+
+    const toolResults = await Promise.all(
+      toolUses.map(async (toolUse) => {
+        if (toolUse.name !== "share_chat") {
+          return {
+            type: "tool_result" as const,
+            tool_use_id: toolUse.id,
+            is_error: true,
+            content: `Unknown tool: ${toolUse.name}`,
+          };
+        }
+
+        const input = parseShareToolInput(toolUse.input);
+        const result = await createShareLink(chatId, userId, {
+          baseUrl,
+          recipients: input.recipients,
+          mode: input.mode,
+          reuse: true,
+        });
+
+        if (!result) {
+          return {
+            type: "tool_result" as const,
+            tool_use_id: toolUse.id,
+            is_error: true,
+            content: "Only the chat owner can share this chat.",
+          };
+        }
+
+        return {
+          type: "tool_result" as const,
+          tool_use_id: toolUse.id,
+          content: result.url,
+        };
+      }),
+    );
+
+    messages.push({
+      role: "user",
+      content: toolResults,
+    });
+  }
+
+  return "I tried to use a tool, but the tool loop did not finish. Please try again.";
+}
+
+function parseShareToolInput(input: unknown): { recipients?: string[]; mode?: ShareMode } {
+  if (!input || typeof input !== "object") return {};
+  const raw = input as Record<string, unknown>;
+  const recipients = Array.isArray(raw.recipients)
+    ? raw.recipients.filter((recipient): recipient is string => typeof recipient === "string")
+    : undefined;
+  const mode = raw.mode === "viewer" || raw.mode === "multiplayer" ? raw.mode : undefined;
+  return { recipients, mode };
 }
