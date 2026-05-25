@@ -5,6 +5,7 @@ import { userCanAccessChat } from "@/lib/access";
 import { withUserDb } from "@/db/client";
 import { contextResources } from "@/db/schema";
 import { listVisibleContextResources, normalizeContextInput } from "@/lib/context";
+import { getAuditRequestMeta, logEvent } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +58,20 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       .from(contextResources)
       .where(eq(contextResources.id, created.id))
       .limit(1);
+
+    await logEvent({
+      userId: user.id,
+      chatId,
+      eventType: "context.add",
+      meta: {
+        resourceId: created.id,
+        kind: created.kind,
+        permission: created.permission,
+        sizeBytes: created.sizeBytes,
+        surface: "rest",
+      },
+      ...getAuditRequestMeta(req),
+    });
 
     return Response.json({ resource }, { status: 201 });
   });

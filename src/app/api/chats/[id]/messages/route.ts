@@ -14,6 +14,7 @@ import {
 import { createShareLink, type ShareMode } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
 import { buildSystemPromptWithContext, listVisibleContextResources } from "@/lib/context";
+import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -81,6 +82,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
 
+  const auditMeta = getAuditRequestMeta(req);
+  await logEvent({
+    userId: user.id,
+    chatId,
+    eventType: "message.send",
+    meta: { messageId: userMsg.id, contentLength: userMsg.content.length, surface: "rest" },
+    ...auditMeta,
+  });
+
   let assistantMsg = null;
   try {
     const replyInput = await withUserDb(user.id, async (tx) => {
@@ -99,7 +109,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     }));
 
     const systemPrompt = buildSystemPromptWithContext(SYSTEM_PROMPT, replyInput.resources);
-    const reply = await generateReplyWithTools(turns, chatId, user.id, getRequestOrigin(req), systemPrompt);
+    const reply = await generateReplyWithTools(turns, chatId, user.id, getRequestOrigin(req), systemPrompt, auditMeta);
     assistantMsg = await withUserDb(user.id, async (tx) => {
       const [inserted] = await tx
         .insert(messages)
@@ -127,6 +137,7 @@ async function generateReplyWithTools(
   userId: string,
   baseUrl: string,
   systemPrompt: string,
+  auditMeta: AuditRequestMeta,
 ): Promise<string> {
   const messages = [...conversation];
 
@@ -170,6 +181,20 @@ async function generateReplyWithTools(
             content: "Only the chat owner can share this chat.",
           };
         }
+
+        await logEvent({
+          userId,
+          chatId,
+          eventType: "share.create",
+          meta: {
+            token: result.token,
+            reused: result.reused,
+            recipientCount: result.recipients.length,
+            mode: result.mode,
+            surface: "agent_tool",
+          },
+          ...auditMeta,
+        });
 
         return {
           type: "tool_result" as const,

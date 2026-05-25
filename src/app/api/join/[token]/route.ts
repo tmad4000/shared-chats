@@ -2,12 +2,13 @@ import { getCurrentUser } from "@/lib/auth";
 import { withUserDb } from "@/db/client";
 import { shareLinks, chatMembers } from "@/db/schema";
 import { and, eq, isNull } from "drizzle-orm";
+import { getAuditRequestMeta, logEvent } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
 // POST /api/join/:token — claim a share link, adds caller as a chat_member.
 // Returns the chat id so the client can redirect to /chat/<id>.
-export async function POST(_req: Request, ctx: { params: Promise<{ token: string }> }) {
+export async function POST(req: Request, ctx: { params: Promise<{ token: string }> }) {
   const user = await getCurrentUser();
   if (!user) return Response.json({ error: "unauthenticated" }, { status: 401 });
 
@@ -37,6 +38,14 @@ export async function POST(_req: Request, ctx: { params: Promise<{ token: string
         console.error("[join] failed", e);
         return Response.json({ error: "join failed" }, { status: 500 });
       }
+
+      await logEvent({
+        userId: user.id,
+        chatId: link.chatId,
+        eventType: "chat.join",
+        meta: { token },
+        ...getAuditRequestMeta(req),
+      });
 
       return Response.json({ chatId: link.chatId });
     },

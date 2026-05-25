@@ -276,3 +276,41 @@ create policy api_keys_update_owner on public.api_keys
 drop policy if exists api_keys_delete_owner on public.api_keys;
 create policy api_keys_delete_owner on public.api_keys
   for delete using (user_id = public.current_app_user_id());
+
+-- ============================================================
+-- audit_events
+-- ============================================================
+alter table public.audit_events enable row level security;
+-- Do not FORCE RLS here: public.log_audit_event is SECURITY DEFINER and must
+-- be able to append even when the caller has no current app user context.
+alter table public.audit_events no force row level security;
+
+drop policy if exists audit_events_select_owner on public.audit_events;
+create policy audit_events_select_owner on public.audit_events
+  for select using (user_id = public.current_app_user_id());
+
+drop policy if exists audit_events_insert_append_only on public.audit_events;
+create policy audit_events_insert_append_only on public.audit_events
+  for insert with check (true);
+
+drop policy if exists audit_events_no_update on public.audit_events;
+drop policy if exists audit_events_no_delete on public.audit_events;
+
+create or replace function public.log_audit_event(
+  p_user_id uuid,
+  p_chat_id uuid,
+  p_event_type text,
+  p_meta jsonb default '{}'::jsonb,
+  p_ip text default null,
+  p_user_agent text default null
+) returns uuid as $$
+declare
+  v_id uuid;
+begin
+  insert into public.audit_events (user_id, chat_id, event_type, meta, ip, user_agent)
+  values (p_user_id, p_chat_id, p_event_type, coalesce(p_meta, '{}'::jsonb), p_ip, p_user_agent)
+  returning id into v_id;
+
+  return v_id;
+end;
+$$ language plpgsql security definer set search_path = public;

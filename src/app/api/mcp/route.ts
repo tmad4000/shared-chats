@@ -11,6 +11,7 @@ import { chatMembers, chats, contextResources, messages } from "@/db/schema";
 import { createShareLink } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
 import { listVisibleContextResources, normalizeContextInput } from "@/lib/context";
+import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -24,7 +25,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const server = createServer(auth.user.id, getRequestOrigin(req));
+  const server = createServer(auth.user.id, getRequestOrigin(req), getAuditRequestMeta(req));
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -54,7 +55,7 @@ export async function OPTIONS() {
   return new Response(null, { status: 204, headers: corsHeaders() });
 }
 
-function createServer(userId: string, baseUrl: string) {
+function createServer(userId: string, baseUrl: string, auditMeta: AuditRequestMeta) {
   const server = new McpServer(
     { name: "shared-chats", version: "0.0.5" },
     {
@@ -116,6 +117,19 @@ function createServer(userId: string, baseUrl: string) {
       if (!result) {
         return { content: [{ type: "text", text: "Only the chat owner can share this chat." }], isError: true };
       }
+      await logEvent({
+        userId,
+        chatId,
+        eventType: "share.create",
+        meta: {
+          token: result.token,
+          reused: result.reused,
+          recipientCount: result.recipients.length,
+          mode: result.mode,
+          surface: "mcp",
+        },
+        ...auditMeta,
+      });
       return jsonToolResult(result);
     },
   );
@@ -157,6 +171,19 @@ function createServer(userId: string, baseUrl: string) {
       if (!result.ok) {
         return { content: [{ type: "text", text: result.error }], isError: true };
       }
+      await logEvent({
+        userId,
+        chatId,
+        eventType: "context.add",
+        meta: {
+          resourceId: getRecordId(result.resource),
+          kind,
+          permission: permission ?? "shared",
+          sizeBytes: Buffer.byteLength(content, "utf8"),
+          surface: "mcp",
+        },
+        ...auditMeta,
+      });
       return jsonToolResult({ resource: result.resource });
     },
   );
@@ -177,6 +204,13 @@ function createServer(userId: string, baseUrl: string) {
       if (!removed) {
         return { content: [{ type: "text", text: "Context not found or not removable." }], isError: true };
       }
+      await logEvent({
+        userId,
+        chatId,
+        eventType: "context.remove",
+        meta: { resourceId, surface: "mcp" },
+        ...auditMeta,
+      });
       return jsonToolResult({ ok: true, resourceId });
     },
   );
@@ -197,6 +231,13 @@ function createServer(userId: string, baseUrl: string) {
       if (!created) {
         return { content: [{ type: "text", text: "Chat not found or not visible." }], isError: true };
       }
+      await logEvent({
+        userId,
+        chatId,
+        eventType: "message.send",
+        meta: { messageId: created.id, contentLength: created.content.length, surface: "mcp" },
+        ...auditMeta,
+      });
       return jsonToolResult({ message: created });
     },
   );
@@ -328,6 +369,10 @@ function jsonToolResult(value: unknown) {
       },
     ],
   };
+}
+
+function getRecordId(value: unknown): string | undefined {
+  return value && typeof value === "object" && "id" in value && typeof value.id === "string" ? value.id : undefined;
 }
 
 function corsHeaders() {

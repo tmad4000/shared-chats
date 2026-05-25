@@ -5,6 +5,7 @@ import { userCanAccessChat } from "@/lib/access";
 import { withUserDb } from "@/db/client";
 import { contextResources } from "@/db/schema";
 import { listVisibleContextResources, normalizeContextPatch } from "@/lib/context";
+import { getAuditRequestMeta, logEvent } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +43,7 @@ export async function PATCH(
 
 // DELETE /api/chats/:id/context/:resourceId — remove a context resource.
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: { params: Promise<{ id: string; resourceId: string }> },
 ) {
   const user = await getCurrentUser();
@@ -62,6 +63,14 @@ export async function DELETE(
     if (deleted.length === 0) {
       return Response.json({ error: "not found or not editable" }, { status: 404 });
     }
+
+    await logEvent({
+      userId: user.id,
+      chatId,
+      eventType: "context.remove",
+      meta: { resourceId, surface: "rest" },
+      ...getAuditRequestMeta(req),
+    });
 
     return Response.json({ ok: true });
   });

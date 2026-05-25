@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, integer, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { check, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 // ============ users ============
 // Email is the natural identity (matches betterGPT design — see note-sharing-service.ts
@@ -86,6 +86,20 @@ export const apiKeys = pgTable("api_keys", {
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
 });
 
+// ============ audit_events ============
+// Append-only security and safety event log. chatId intentionally has no FK so
+// chat deletion does not erase the audit trail.
+export const auditEvents = pgTable("audit_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+  chatId: uuid("chat_id"),
+  eventType: text("event_type").notNull(),
+  meta: jsonb("meta").notNull().default({}),
+  ip: text("ip"),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type Chat = typeof chats.$inferSelect;
 export type Message = typeof messages.$inferSelect;
@@ -93,3 +107,4 @@ export type ShareLink = typeof shareLinks.$inferSelect;
 export type ChatMember = typeof chatMembers.$inferSelect;
 export type ContextResource = typeof contextResources.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
+export type AuditEvent = typeof auditEvents.$inferSelect;

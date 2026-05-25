@@ -6,6 +6,7 @@ import { shareLinks } from "@/db/schema";
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { createShareLink } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
+import { getAuditRequestMeta, logEvent } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -57,5 +58,18 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   if (!result) {
     return Response.json({ error: "only the owner can share" }, { status: 403 });
   }
+  await logEvent({
+    userId: user.id,
+    chatId,
+    eventType: "share.create",
+    meta: {
+      token: result.token,
+      reused: result.reused,
+      recipientCount: result.recipients.length,
+      mode: result.mode,
+      surface: "rest",
+    },
+    ...getAuditRequestMeta(req),
+  });
   return Response.json(result);
 }
