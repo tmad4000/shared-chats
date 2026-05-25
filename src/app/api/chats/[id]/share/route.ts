@@ -7,6 +7,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 import { createShareLink } from "@/lib/share";
 import { getRequestOrigin } from "@/lib/http";
 import { getAuditRequestMeta, logEvent } from "@/lib/audit";
+import { check as checkRateLimit, retryAfterSeconds } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const { id: chatId } = await ctx.params;
   const body = await req.json().catch(() => ({} as Record<string, unknown>));
   const reuse = body?.reuse !== false; // default true
+  const auditMeta = getAuditRequestMeta(req);
+
+  const rate = checkRateLimit(`share:${user.id}`, 10, 60_000);
+  if (!rate.ok) {
+    await logEvent({
+      userId: user.id,
+      chatId,
+      eventType: "rate_limit.exceeded",
+      meta: { key: "share", limit: 10, windowMs: 60_000, retryAfterMs: rate.retryAfterMs, surface: "rest" },
+      ...auditMeta,
+    });
+    return Response.json(
+      { error: "rate_limited", retryAfterMs: rate.retryAfterMs },
+      { status: 429, headers: { "Retry-After": retryAfterSeconds(rate.retryAfterMs) } },
+    );
+  }
 
   const result = await createShareLink(chatId, user.id, {
     baseUrl: getRequestOrigin(req),
@@ -69,7 +86,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       mode: result.mode,
       surface: "rest",
     },
-    ...getAuditRequestMeta(req),
+    ...auditMeta,
   });
   return Response.json(result);
 }

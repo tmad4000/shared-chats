@@ -16,6 +16,7 @@ import { getRequestOrigin } from "@/lib/http";
 import { buildSystemPromptWithContext, listVisibleContextResources } from "@/lib/context";
 import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
 import { checkBudget } from "@/lib/budget";
+import { check as checkRateLimit, retryAfterSeconds } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -64,6 +65,21 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const canAccess = await withUserDb(user.id, (tx) => userCanAccessChat(user.id, chatId, tx));
   if (!canAccess) {
     return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+
+  const rate = checkRateLimit(`msg:${user.id}`, 30, 60_000);
+  if (!rate.ok) {
+    await logEvent({
+      userId: user.id,
+      chatId,
+      eventType: "rate_limit.exceeded",
+      meta: { key: "msg", limit: 30, windowMs: 60_000, retryAfterMs: rate.retryAfterMs, surface: "rest" },
+      ...auditMeta,
+    });
+    return Response.json(
+      { error: "rate_limited", retryAfterMs: rate.retryAfterMs },
+      { status: 429, headers: { "Retry-After": retryAfterSeconds(rate.retryAfterMs) } },
+    );
   }
 
   const budget = await checkBudget(user.id);

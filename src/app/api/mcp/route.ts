@@ -13,6 +13,7 @@ import { getRequestOrigin } from "@/lib/http";
 import { listVisibleContextResources, normalizeContextInput } from "@/lib/context";
 import { getAuditRequestMeta, logEvent, type AuditRequestMeta } from "@/lib/audit";
 import { checkBudget } from "@/lib/budget";
+import { check as checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -109,6 +110,21 @@ function createServer(userId: string, baseUrl: string, auditMeta: AuditRequestMe
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     },
     async ({ chatId, recipients, mode }) => {
+      const rate = checkRateLimit(`share:${userId}`, 10, 60_000);
+      if (!rate.ok) {
+        await logEvent({
+          userId,
+          chatId,
+          eventType: "rate_limit.exceeded",
+          meta: { key: "share", limit: 10, windowMs: 60_000, retryAfterMs: rate.retryAfterMs, surface: "mcp" },
+          ...auditMeta,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: "rate_limited", retryAfterMs: rate.retryAfterMs }) }],
+          isError: true,
+        };
+      }
+
       const result = await createShareLink(chatId, userId, {
         baseUrl,
         recipients,
@@ -231,6 +247,21 @@ function createServer(userId: string, baseUrl: string, auditMeta: AuditRequestMe
       const accessible = await withUserDb(userId, (tx) => userCanAccessChat(userId, chatId, tx));
       if (!accessible) {
         return { content: [{ type: "text", text: "Chat not found or not visible." }], isError: true };
+      }
+
+      const rate = checkRateLimit(`msg:${userId}`, 30, 60_000);
+      if (!rate.ok) {
+        await logEvent({
+          userId,
+          chatId,
+          eventType: "rate_limit.exceeded",
+          meta: { key: "msg", limit: 30, windowMs: 60_000, retryAfterMs: rate.retryAfterMs, surface: "mcp" },
+          ...auditMeta,
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: "rate_limited", retryAfterMs: rate.retryAfterMs }) }],
+          isError: true,
+        };
       }
 
       const budget = await checkBudget(userId);
