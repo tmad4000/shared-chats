@@ -1,17 +1,24 @@
 "use client";
 
-import { useState, FormEvent, Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useState, useEffect, FormEvent } from "react";
+import { useRouter } from "next/navigation";
 
-function LoginInner() {
+export default function LoginPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const next = searchParams.get("next") || "/";
-
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [next, setNext] = useState("/");
+
+  // Read `next` from URL on the client — avoids the useSearchParams Suspense
+  // bailout that was leaving the page stuck on "Loading…" on first paint.
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      setNext(params.get("next") || "/");
+    }
+  }, []);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -27,11 +34,10 @@ function LoginInner() {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || "login failed");
       }
-      router.push(next);
-      router.refresh();
+      // Hard-navigate so the auth cookie is sent on the next request
+      window.location.href = next;
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "login failed");
-    } finally {
       setBusy(false);
     }
   }
@@ -131,14 +137,12 @@ function LoginInner() {
           {busy ? "Signing in…" : "Continue"}
         </button>
       </form>
-    </main>
-  );
-}
 
-export default function LoginPage() {
-  return (
-    <Suspense fallback={<main style={{ padding: 80, textAlign: "center" }}>Loading…</main>}>
-      <LoginInner />
-    </Suspense>
+      <p style={{
+        marginTop: 24, fontSize: 12, color: "var(--text-tertiary)", textAlign: "center",
+      }}>
+        v0.0.2 · <a href="https://github.com/tmad4000/shared-chats" style={{ color: "var(--text-tertiary)" }}>tmad4000/shared-chats</a>
+      </p>
+    </main>
   );
 }
